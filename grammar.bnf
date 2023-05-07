@@ -1,0 +1,8 @@
+
+
+
+<add-binary-expression>  ::= <star-binary-expression> "+" <star-binary-expression> | <value>
+<star-binary-expression> ::= <value> "*" <star-binary-expression> | <value>
+
+<value>                  ::= <parenthesized-expression> | <literal>
+<literal>                ::= <number>
