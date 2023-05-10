@@ -3,13 +3,16 @@ use std::vec;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum TokenType {
-    // Value
-    Number,     // e.g. 420
-    Identifier, // e.g. hello_world
-
     // Keywords
-    True,  // true
-    False, // false
+    Let,
+    // Value
+    Number, // e.g. 420
+    Ident,  // e.g. hello_world
+    True,   // true
+    False,  // false
+
+    // Assignment operator
+    Eq,
 
     // Arithmetic operators
     Div, // /
@@ -20,12 +23,12 @@ pub enum TokenType {
     Pow, // **
 
     // Comparison operators
-    Eq,  // ==
-    Neq, // !=
-    Gt,  // >
-    Gte, // >=
-    Lt,  // <
-    Lte, // <=
+    EqEq, // ==
+    Neq,  // !=
+    Gt,   // >
+    Gte,  // >=
+    Lt,   // <
+    Lte,  // <=
 
     // Boolean operators
     And, // and
@@ -39,22 +42,64 @@ pub enum TokenType {
     RightBracket, // ]
     LeftBrace,    // {
     RightBrace,   // }
+    NewLine,
+}
+
+impl ToString for TokenType {
+    fn to_string(&self) -> String {
+        String::from(match self {
+            TokenType::Let => "let",
+            TokenType::Number => "number",
+            TokenType::Ident => "identifier",
+            TokenType::True => "true",
+            TokenType::False => "false",
+            TokenType::Eq => "=",
+            TokenType::Div => "/",
+            TokenType::Sub => "-",
+            TokenType::Mod => "%",
+            TokenType::Add => "+",
+            TokenType::Mul => "*",
+            TokenType::Pow => "**",
+            TokenType::EqEq => "==",
+            TokenType::Neq => "!=",
+            TokenType::Gt => ">",
+            TokenType::Gte => ">=",
+            TokenType::Lt => "<",
+            TokenType::Lte => "<=",
+            TokenType::And => "and",
+            TokenType::Or => "or",
+            TokenType::Not => "not",
+            TokenType::LeftParen => "(",
+            TokenType::RightParen => ")",
+            TokenType::LeftBracket => "[",
+            TokenType::RightBracket => "]",
+            TokenType::LeftBrace => "{",
+            TokenType::RightBrace => "}",
+            TokenType::NewLine => "new line",
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct Token {
     pub r#type: TokenType,
     pub value: String,
-    pub coordinates: Coords,
+    pub coords: Coords,
 }
 
 impl Token {
-    fn new(r#type: TokenType, value: String, coordinates: Coords) -> Self {
+    pub fn new(r#type: TokenType, value: String, coords: Coords) -> Self {
         Self {
             r#type,
             value,
-            coordinates,
+            coords,
         }
+    }
+    pub fn end_coords(&self) -> Coords {
+        Coords::new(
+            self.coords.line,
+            self.coords.column + self.value.len() as u16 - 1,
+        )
     }
 }
 
@@ -122,11 +167,21 @@ pub fn tokenize(s: &str) -> Vec<Token> {
     while let Some(ch) = tokenizer.next() {
         match ch {
             // Whitespace
+            '\n' => {
+                let coords = Coords::new(
+                    tokenizer.line - 1,
+                    match acc.last() {
+                        Some(Token { value, coords, .. }) => value.len() as u16 + coords.column,
+                        None => 1,
+                    },
+                );
+                acc.push(Token::new(TokenType::NewLine, "\n".to_string(), coords));
+            }
             x if x.is_whitespace() => (),
 
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-            // VALUES //////////////////////////////////////////////////////////////////////////////////////////////////
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////////
+            // VALUES //////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////////
 
             // Numbers
             x if x.is_numeric() => {
@@ -167,18 +222,19 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                         "and" => TokenType::And,
                         "or" => TokenType::Or,
                         "not" => TokenType::Not,
-                        _ => TokenType::Identifier,
+                        "let" => TokenType::Let,
+                        _ => TokenType::Ident,
                     },
                     word_acc,
                     Coords::new(line, column),
                 ));
             }
 
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-            // OPERATORS ///////////////////////////////////////////////////////////////////////////////////////////////
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////////
+            // OPERATORS ///////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////////
 
-            // ARITHMETIC OPERATORS ////////////////////////////////////////////////////////////////////////////////////
+            // ARITHMETIC OPERATORS ////////////////////////////////////////////////////////////////
             // ** operator
             '*' if tokenizer.peek() == Some('*') => {
                 acc.push(Token::new(
@@ -188,35 +244,30 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                 ));
                 tokenizer.next();
             }
-
             // * operator
             '*' => acc.push(Token::new(
                 TokenType::Mul,
                 "*".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
-
             // / operator
             '/' => acc.push(Token::new(
                 TokenType::Div,
                 "/".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
-
             // + operator
             '+' => acc.push(Token::new(
                 TokenType::Add,
                 "+".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
-
             // - operator
             '-' => acc.push(Token::new(
                 TokenType::Sub,
                 "-".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
-
             // % operator
             '%' => acc.push(Token::new(
                 TokenType::Mod,
@@ -224,11 +275,11 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
 
-            // COMPARISON OPERATORS ////////////////////////////////////////////////////////////////////////////////////
+            // COMPARISON OPERATORS ////////////////////////////////////////////////////////////////
             // == operator
             '=' if tokenizer.peek() == Some('=') => {
                 acc.push(Token::new(
-                    TokenType::Eq,
+                    TokenType::EqEq,
                     "==".to_string(),
                     Coords::new(tokenizer.line, tokenizer.column - 1),
                 ));
@@ -258,7 +309,6 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                 ">".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
-
             // <= operator
             '<' if tokenizer.peek() == Some('=') => {
                 acc.push(Token::new(
@@ -275,9 +325,17 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
 
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-            // DELIMITERS //////////////////////////////////////////////////////////////////////////////////////////////
-            ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            // ASSIGNMENT OPERATOR /////////////////////////////////////////////////////////////////
+            // = operator
+            '=' => acc.push(Token::new(
+                TokenType::Eq,
+                "=".to_string(),
+                Coords::new(tokenizer.line, tokenizer.column - 1),
+            )),
+
+            ////////////////////////////////////////////////////////////////////////////////////////
+            // DELIMITERS //////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////////
 
             // Parentheses `(` and `)`
             '(' => acc.push(Token::new(
@@ -290,6 +348,7 @@ pub fn tokenize(s: &str) -> Vec<Token> {
                 ")".to_string(),
                 Coords::new(tokenizer.line, tokenizer.column - 1),
             )),
+
             _ => unimplemented!(),
         }
     }
@@ -333,7 +392,7 @@ mod tests {
 
     #[test]
     fn tokenize_operators() {
-        let input = "* + / - ** > >= < <=";
+        let input = "* + / - ** > >= < <= == = !=";
         let expected = vec![
             Token::new(TokenType::Mul, "*".to_string(), Coords::new(1, 1)),
             Token::new(TokenType::Add, "+".to_string(), Coords::new(1, 3)),
@@ -344,6 +403,9 @@ mod tests {
             Token::new(TokenType::Gte, ">=".to_string(), Coords::new(1, 14)),
             Token::new(TokenType::Lt, "<".to_string(), Coords::new(1, 17)),
             Token::new(TokenType::Lte, "<=".to_string(), Coords::new(1, 19)),
+            Token::new(TokenType::EqEq, "==".to_string(), Coords::new(1, 22)),
+            Token::new(TokenType::Eq, "=".to_string(), Coords::new(1, 25)),
+            Token::new(TokenType::Neq, "!=".to_string(), Coords::new(1, 27)),
         ];
         assert_eq!(tokenize(input), expected);
     }
@@ -375,10 +437,33 @@ mod tests {
     fn tokenize_not_keywords() {
         let input = "truefalseandornot";
         let expected = vec![Token::new(
-            TokenType::Identifier,
+            TokenType::Ident,
             "truefalseandornot".to_string(),
             Coords::new(1, 1),
         )];
+        assert_eq!(tokenize(input), expected);
+    }
+
+    #[test]
+    fn tokenize_newline() {
+        let input = "\n";
+        let expected = vec![Token::new(
+            TokenType::NewLine,
+            "\n".to_string(),
+            Coords::new(1, 1),
+        )];
+        assert_eq!(tokenize(input), expected);
+    }
+
+    #[test]
+    fn tokenize_let_decl() {
+        let input = "let a=5";
+        let expected = vec![
+            Token::new(TokenType::Let, "let".to_string(), Coords::new(1, 1)),
+            Token::new(TokenType::Ident, "a".to_string(), Coords::new(1, 5)),
+            Token::new(TokenType::Eq, "=".to_string(), Coords::new(1, 6)),
+            Token::new(TokenType::Number, "5".to_string(), Coords::new(1, 7)),
+        ];
         assert_eq!(tokenize(input), expected);
     }
 }

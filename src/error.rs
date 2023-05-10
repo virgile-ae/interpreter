@@ -28,3 +28,15 @@ impl Position {
         }
     }
 }
+
+#[macro_export]
+macro_rules! err_msg {
+    ($coords:ident$(.$coords_rest:ident)*, $msg:literal $(, $values_to_interpolate:ident)* $(,)?) => {
+        Err(
+            format!(
+                "line {}, column {}: {}\n",
+                $coords$(.$coords_rest)*.line, $coords$(.$coords_rest)*.column, format!($msg $(, $values_to_interpolate)*)
+            )
+        )
+    };
+}

@@ -1,8 +1,21 @@
+<program> ::= <declaration> "\n" <program> | <declaration> | ""
 
+<declaration> ::= <assignment-declaration> | <expression-declaration>
 
+<assignment-declaration> ::= "let" <identifier> "=" <expression>
+<expression-declaration> ::= <expression>
 
-<add-binary-expression>  ::= <star-binary-expression> "+" <star-binary-expression> | <value>
-<star-binary-expression> ::= <value> "*" <star-binary-expression> | <value>
+<expression> ::= <binary-expression>
 
-<value>                  ::= <parenthesized-expression> | <literal>
-<literal>                ::= <number>
+<binary-expression> ::= <unary-expression> <binary-operator> <binary-expression>
+                      | <unary-expression>
+<binary-operator>   ::= "+" | "-" | "*" | "/" | "**" | "%"
+                      | "==" | "!=" | ">" | ">=" | "<" | "<="
+                      | "and" | "or"
+
+<unary-expression>  ::= <unary-operator> <value> | <value>
+<unary-operator>    ::= "-" | "not"
+
+<value>                    ::= <parenthesized-expression> | <literal> | <identifier>
+<parenthesized-expression> ::= "(" <expression> ")"
+<literal>                  ::= <number> | "true" | "false"

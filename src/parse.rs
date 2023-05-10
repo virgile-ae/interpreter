@@ -1,25 +1,22 @@
 use crate::{
     ast::*,
+    err_msg,
     error::{Coords, Position},
-    token::{self, Token, TokenType},
+    token::{Token, TokenType},
 };
 
 #[derive(Debug)]
 pub(crate) struct Parser {
-    tokens: Vec<token::Token>,
+    tokens: Vec<Token>,
     index: usize,
 }
 
 impl Parser {
-    pub const fn new(tokens: Vec<token::Token>) -> Self {
+    pub const fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, index: 0 }
     }
 
-    fn remaining(&self) -> usize {
-        self.tokens.len() - self.index
-    }
-
-    fn first(&self) -> Result<token::Token, String> {
+    fn first(&self) -> Result<Token, String> {
         if self.index < self.tokens.len() {
             Ok(self.tokens[self.index].clone())
         } else {
@@ -27,24 +24,104 @@ impl Parser {
         }
     }
 
+    fn previous(&self) -> Option<&Token> {
+        self.tokens.iter().nth(self.index - 1)
+    }
+
     fn consume_first(&mut self) {
         self.index += 1;
     }
 
-    fn reached_end(&self) -> bool {
-        self.index >= self.tokens.len()
+    fn consume_token_of_type(&mut self, tok_type: TokenType) -> Result<Token, String> {
+        match self.first() {
+            Ok(Token {
+                r#type,
+                value,
+                coords,
+            }) if r#type == tok_type => {
+                self.consume_first();
+                Ok(Token::new(r#type, value, coords))
+            }
+            Ok(Token { value, coords, .. }) => {
+                let tok_str = tok_type.to_string();
+                err_msg!(coords, "expected `{}`, but got `{}`", tok_str, value)
+            }
+            Err(e) if e == String::from(EOF_ERROR) => {
+                let coords = match self.previous() {
+                    Some(Token { coords, .. }) => *coords,
+                    None => Coords::new(1, 1),
+                };
+                let tok_str = tok_type.to_string();
+                err_msg!(coords, "expected `{}`, but reached end of file", tok_str)
+            }
+            Err(_) => unreachable!(),
+        }
     }
 }
 
 const EOF_ERROR: &'static str = "unexpected end of file";
 
-pub fn parse(tokens: Vec<token::Token>) -> Result<Node, String> {
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Node>, String> {
     let mut parser = Parser::new(tokens);
-    expression(&mut parser)
+    declarations(&mut parser)
+}
+
+pub(crate) fn declarations(parser: &mut Parser) -> Result<Vec<Node>, String> {
+    let mut acc = vec![];
+    loop {
+        match declaration(parser) {
+            Ok(x) => acc.push(x),
+            Err(e) if e == EOF_ERROR => return Ok(acc),
+            Err(e) => return Err(e),
+        }
+        match parser.consume_token_of_type(TokenType::NewLine) {
+            Ok(_) => (),
+            Err(_) => return Ok(acc),
+        }
+    }
+}
+
+pub(crate) fn declaration(parser: &mut Parser) -> Result<Node, String> {
+    assignment_declaration(parser).or_else(|_| expression_declaration(parser))
 }
 
 pub(crate) fn expression(parser: &mut Parser) -> Result<Node, String> {
     binary_expression(parser)
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// DECLARATIONS ////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+pub(crate) fn assignment_declaration(parser: &mut Parser) -> Result<Node, String> {
+    // let `id` = `expr`
+    // ^^^
+    let r#let = parser.consume_token_of_type(TokenType::Let)?;
+
+    // let `id` = `expr`
+    //     ^^^^
+    let identifier = parser.consume_token_of_type(TokenType::Ident)?;
+
+    // let `id` = `expr`
+    //          ^
+    parser.consume_token_of_type(TokenType::Eq)?;
+
+    // let `id` = `expr`
+    //            ^^^^^^
+    let value = expression(parser)?;
+
+    let end = value.position.end;
+    Ok(Node::new(
+        NodeType::Declaration(Declaration::Assignment {
+            id: identifier.value,
+            body: Box::new(value),
+        }),
+        Position::new(r#let.coords, end),
+    ))
+}
+
+pub(crate) fn expression_declaration(parser: &mut Parser) -> Result<Node, String> {
+    expression(parser)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -61,7 +138,7 @@ macro_rules! binary_expression_parser {
             let left = $below(parser)?;
 
             match parser.first() {
-                Ok(token::Token {
+                Ok(Token {
                     r#type: $tok_type,
                     ..
                 }) => parser.consume_first(),
@@ -84,158 +161,114 @@ macro_rules! binary_expression_parser {
     };
 }
 
+// BOOLEAN EXPRESSIONS /////////////////////////////////////////////////////////////////////////////
 binary_expression_parser!(
     or_binary_expression,
     and_binary_expression,
-    token::TokenType::Or,
+    TokenType::Or,
     Operator::Or,
 );
 
 binary_expression_parser!(
     and_binary_expression,
     comparative_expression,
-    token::TokenType::And,
+    TokenType::And,
     Operator::And
 );
 
+// COMPARATIVE EXPRESSIONS /////////////////////////////////////////////////////////////////////////
+macro_rules! consume_right_and_create_node {
+    (
+        $parser:ident, $left:ident,
+        $op_type:ident$(::$op_type_rest:ident)* $(,)?
+    ) => {
+            {
+                $parser.consume_first();
+                let right = modulo_binary_expression($parser)?;
+                let (l_pos, r_pos) = ($left.position.start, right.position.end);
+                Ok(Node::new(
+                    NodeType::Operator($op_type$(::$op_type_rest)* {
+                        left: Box::new($left),
+                        right: Box::new(right),
+                    }),
+                    Position::new(l_pos, r_pos),
+                ))
+            }
+    };
+}
 fn comparative_expression(parser: &mut Parser) -> Result<Node, String> {
     let left = modulo_binary_expression(parser)?;
     match parser.first() {
-        Ok(token::Token {
-            r#type: token::TokenType::Eq,
+        Ok(Token {
+            r#type: TokenType::EqEq,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Eq {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
-        Ok(token::Token {
-            r#type: token::TokenType::Neq,
+        }) => consume_right_and_create_node!(parser, left, Operator::EqEq),
+        Ok(Token {
+            r#type: TokenType::Neq,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Neq {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
-        Ok(token::Token {
-            r#type: token::TokenType::Gt,
+        }) => consume_right_and_create_node!(parser, left, Operator::Neq),
+        Ok(Token {
+            r#type: TokenType::Gt,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Gt {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
-        Ok(token::Token {
-            r#type: token::TokenType::Gte,
+        }) => consume_right_and_create_node!(parser, left, Operator::Gt),
+        Ok(Token {
+            r#type: TokenType::Gte,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Gte {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
-        Ok(token::Token {
-            r#type: token::TokenType::Lt,
+        }) => consume_right_and_create_node!(parser, left, Operator::Gte),
+        Ok(Token {
+            r#type: TokenType::Lt,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Lt {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
-        Ok(token::Token {
-            r#type: token::TokenType::Lte,
+        }) => consume_right_and_create_node!(parser, left, Operator::Lt),
+        Ok(Token {
+            r#type: TokenType::Lte,
             ..
-        }) => {
-            parser.consume_first();
-            let right = modulo_binary_expression(parser)?;
-            let (l_pos, r_pos) = (left.position.start, right.position.end);
-            Ok(Node::new(
-                NodeType::Operator(Operator::Lte {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(l_pos, r_pos),
-            ))
-        }
+        }) => consume_right_and_create_node!(parser, left, Operator::Lte),
         Ok(_) => Ok(left),
         Err(e) if e == String::from(EOF_ERROR) => Ok(left),
         Err(_) => unreachable!(),
     }
 }
 
+// ARITHMETIC EXPRESSIONS //////////////////////////////////////////////////////////////////////////
 binary_expression_parser!(
     modulo_binary_expression,
     minus_binary_expression,
-    token::TokenType::Mod,
+    TokenType::Mod,
     Operator::Mod,
 );
 
 binary_expression_parser!(
     minus_binary_expression,
     add_binary_expression,
-    token::TokenType::Sub,
+    TokenType::Sub,
     Operator::Sub,
 );
 
 binary_expression_parser!(
     add_binary_expression,
     star_binary_expression,
-    token::TokenType::Add,
+    TokenType::Add,
     Operator::Add,
 );
 
 binary_expression_parser!(
     star_binary_expression,
     divide_binary_expression,
-    token::TokenType::Mul,
+    TokenType::Mul,
     Operator::Mul,
 );
 
 binary_expression_parser!(
     divide_binary_expression,
     exponent_binary_expression,
-    token::TokenType::Div,
+    TokenType::Div,
     Operator::Div,
 );
 
 binary_expression_parser!(
     exponent_binary_expression,
     not_unary_expression,
-    token::TokenType::Pow,
+    TokenType::Pow,
     Operator::Pow,
 );
 
@@ -248,12 +281,12 @@ macro_rules! unary_expression_parser {
         fn $func_name(parser: &mut Parser) -> Result<Node, String> {
             let left_pos;
             match parser.first() {
-                Ok(token::Token {
+                Ok(Token {
                     r#type: $tok_type,
-                    coordinates,
+                    coords,
                     ..
                 }) => {
-                    left_pos = coordinates;
+                    left_pos = coords;
                     parser.consume_first();
                 }
                 Ok(_) => return $below(parser),
@@ -274,14 +307,14 @@ macro_rules! unary_expression_parser {
 unary_expression_parser!(
     not_unary_expression,
     minus_unary_expression,
-    token::TokenType::Not,
+    TokenType::Not,
     Operator::Not,
 );
 
 unary_expression_parser!(
     minus_unary_expression,
     value_expression,
-    token::TokenType::Sub,
+    TokenType::Sub,
     Operator::UnarySub,
 );
 
@@ -299,47 +332,44 @@ pub(crate) fn value_expression(parser: &mut Parser) -> Result<Node, String> {
             r#type: TokenType::Number | TokenType::False | TokenType::True,
             ..
         } => literal_expression(parser),
-        _ => unreachable!(),
+        Token {
+            r#type: TokenType::Ident,
+            ..
+        } => ident_expression(parser),
+        _ => unimplemented!(),
     }
 }
 
 pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Node, String> {
+    let Token { coords, .. } = parser.consume_token_of_type(TokenType::LeftParen)?;
+    // Check that expr has a body
     match parser.first() {
-        Ok(token::Token {
-            r#type: token::TokenType::LeftParen,
+        Ok(Token {
+            r#type: TokenType::RightParen,
             ..
-        }) => parser.consume_first(),
-        Ok(val) => return Err(format!("expected left parenthesis `(`, got {:?}", val)),
-        Err(e) if e == String::from(EOF_ERROR) => return Err(String::from(EOF_ERROR)),
-        Err(_) => unreachable!(),
+        }) => return err_msg!(coords, "parenthesized expression has no body"),
+        Err(_) => {
+            return err_msg!(
+                coords,
+                "reached end of file without closing the parenthesized expression"
+            )
+        }
+        _ => (),
     }
     let body = match expression(parser) {
         Ok(val) => val,
-        Err(_) => return Err(format!("parethesized expression has no body")),
+        Err(_) => return err_msg!(coords, "parethesized expression has incorrect contents"),
     };
-    match parser.first() {
-        Ok(token::Token {
-            r#type: token::TokenType::RightParen,
-            ..
-        }) => parser.consume_first(),
-        Ok(val) => {
-            return Err(format!(
-                "unclosed parenthesized expression, expected right parenthesis `)`, got {:?}",
-                val
-            ))
-        }
-        Err(e) if e == String::from(EOF_ERROR) => return Err(format!("unclosed parenthesized expression, expected right parenthesis `)`, but reached end of file")),
-        Err(_) => unreachable!(),
-    }
+    parser.consume_token_of_type(TokenType::RightParen)?;
     Ok(body)
 }
 
 pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
     match parser.first()? {
-        token::Token {
-            r#type: token::TokenType::Number,
+        Token {
+            r#type: TokenType::Number,
             value,
-            coordinates: Coords { line, column },
+            coords: Coords { line, column },
         } => {
             parser.consume_first();
             Ok(Node::new(
@@ -347,10 +377,10 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
                 Position::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
             ))
         }
-        token::Token {
-            r#type: token::TokenType::True | token::TokenType::False,
+        Token {
+            r#type: TokenType::True | TokenType::False,
             value,
-            coordinates: Coords { line, column },
+            coords: Coords { line, column },
         } => {
             parser.consume_first();
             Ok(Node::new(
@@ -358,15 +388,29 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
                 Position::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
             ))
         }
-        token::Token {
-            r#type: _type,
+        Token {
+            r#type,
             value,
-            coordinates,
-        } => Err(format!(
-            "{:?}:{:?} expected literal, got `{}` of type `{:?}`",
-            coordinates.line, coordinates.column, value, _type
-        )),
+            coords,
+        } => {
+            let tok_str = r#type.to_string();
+            err_msg!(
+                coords,
+                "expected literal, got `{}` of type `{}`",
+                value,
+                tok_str
+            )
+        }
     }
+}
+
+pub(crate) fn ident_expression(parser: &mut Parser) -> Result<Node, String> {
+    let token = parser.consume_token_of_type(TokenType::Ident)?;
+    let end_coords = token.end_coords();
+    Ok(Node::new(
+        NodeType::Ident(token.value),
+        Position::new(token.coords, end_coords),
+    ))
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -511,7 +555,7 @@ mod tests {
     #[test]
     fn parenthesized_expression() {
         let input = "(2 + 3) * 3";
-        let expected = Ok(Node::new(
+        let expected = Node::new(
             NodeType::Operator(Operator::Mul {
                 left: Node::new_boxed(
                     NodeType::Operator(Operator::Add {
@@ -532,14 +576,14 @@ mod tests {
                 ),
             }),
             Position::from_tuples((1, 2), (1, 11)),
-        ));
-        assert_eq!(parse(token::tokenize(input)), expected);
+        );
+        assert_eq!(parse(token::tokenize(input)).unwrap(), vec![expected]);
     }
 
     #[test]
     fn unary_minus() {
         let input = "- 32 - - 23";
-        let expected = Ok(Node::new(
+        let expected = Node::new(
             NodeType::Operator(Operator::Sub {
                 left: Node::new_boxed(
                     NodeType::Operator(Operator::UnarySub(Node::new_boxed(
@@ -557,8 +601,8 @@ mod tests {
                 ),
             }),
             Position::from_tuples((1, 1), (1, 11)),
-        ));
+        );
 
-        assert_eq!(parse(token::tokenize(input)), expected);
+        assert_eq!(parse(token::tokenize(input)).unwrap(), vec![expected]);
     }
 }
