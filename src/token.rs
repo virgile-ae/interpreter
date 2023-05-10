@@ -160,6 +160,8 @@ macro_rules! rest {
     };
 }
 
+const VALID_IDENTIFIER: fn(char) -> bool = |ch| ch.is_alphanumeric() || ch == '_';
+
 pub fn tokenize(s: &str) -> Vec<Token> {
     let mut acc = vec![];
     let mut tokenizer = Tokenizer::new(s);
@@ -213,7 +215,7 @@ pub fn tokenize(s: &str) -> Vec<Token> {
             x if x.is_alphabetic() => {
                 let (line, column) = (tokenizer.line, tokenizer.column - 1);
                 let mut word_acc = x.to_string();
-                rest!(tokenizer, word_acc, char::is_alphanumeric);
+                rest!(tokenizer, word_acc, VALID_IDENTIFIER);
 
                 acc.push(Token::new(
                     match word_acc.as_str() {

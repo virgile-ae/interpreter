@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
-use crate::ast::{Declaration, Literal, Node, NodeType, Operator};
+use crate::{
+    ast::{Decl, Expr},
+    err_msg,
+};
 
 // Node instead of value makes the language lazy
-pub(crate) type State = HashMap<String, Node>;
+pub(crate) type State = HashMap<String, Expr>;
 
 #[derive(Debug, PartialEq)]
 pub enum Value {
@@ -29,24 +32,24 @@ impl ToString for Value {
 #[macro_export]
 macro_rules! execute {
     ($declarations:ident, $state:ident) => {{
-        use crate::evaluate::execute_;
-        execute_($declarations, &mut $state)
+        use crate::evaluate::execute_inner;
+        execute_inner($declarations, &mut $state)
     }};
     ($declarations:ident) => {{
-        use crate::evaluate::execute_;
+        use crate::evaluate::execute_inner;
         let mut state = Default::default();
-        execute_($declarations, &mut state)
+        execute_inner($declarations, &mut state)
     }};
 }
 pub(crate) use execute;
 
-pub(crate) fn execute_(
-    declarations: Vec<Node>,
+pub(crate) fn execute_inner(
+    declarations: Vec<Decl>,
     state: &mut State,
 ) -> (State, Vec<Result<Value, String>>) {
     let values = declarations
         .iter()
-        .map(|x| declaration(state, Box::new(x.clone())))
+        .map(|x| declaration(state, x.clone()))
         .collect();
     (state.clone(), values)
 }
@@ -54,56 +57,88 @@ pub(crate) fn execute_(
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // DECLARATIONS ////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-pub(crate) fn declaration(state: &mut State, node: Box<Node>) -> Result<Value, String> {
-    match *(*node).value {
-        NodeType::Declaration(_) => assignment_declaration(state, node),
-        _ => expression_declaration(state, node),
+pub(crate) fn declaration(state: &mut State, node: Decl) -> Result<Value, String> {
+    // match node.value {
+    //     NodeType::Declaration(_) => assignment_declaration(state, node),
+    //     _ => expression_declaration(state, node),
+    // }
+    match node {
+        Decl::Assignment { .. } => assignment_declaration(state, node),
+        Decl::Expression(ex) => expression(state, ex),
     }
 }
 
 // ASSIGNMENT DECLARATION //////////////////////////////////////////////////////////////////////////
-fn assignment_declaration(state: &mut State, node: Box<Node>) -> Result<Value, String> {
-    match *node.value {
-        NodeType::Declaration(Declaration::Assignment { id, body }) => {
-            state.insert(id, *body);
-            Ok(Value::Unit)
+fn assignment_declaration(state: &mut State, node: Decl) -> Result<Value, String> {
+    // match *node.value {
+    //     NodeType::Declaration(Declaration::Assignment { id, body }) => {
+    //         if state.contains_key(&id) {
+    //             err_msg!(
+    //                 node.position.start,
+    //                 "variable `{}` cannot be redefined or defined as itself",
+    //                 id
+    //             )
+    //         } else {
+    //             state.insert(id, *body);
+    //             Ok(Value::Unit)
+    //         }
+    //     }
+    //     _ => unreachable!(),
+    // }
+    match node {
+        Decl::Assignment { id, body, position } => {
+            if state.contains_key(&id) {
+                err_msg!(
+                    position.start,
+                    "variable `{}` cannot be redefined or defined as itself",
+                    id
+                )
+            } else {
+                state.insert(id, *body);
+                Ok(Value::Unit)
+            }
         }
         _ => unreachable!(),
     }
 }
 
 // ASSIGNMENT DECLARATION //////////////////////////////////////////////////////////////////////////
-fn expression_declaration(state: &State, node: Box<Node>) -> Result<Value, String> {
-    expression(state, node)
+fn expression_declaration(state: &State, node: Decl) -> Result<Value, String> {
+    match node {
+        Decl::Expression(e) => expression(state, e),
+        _ => unreachable!(),
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // EXPRESSIONS /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-fn expression(state: &State, node: Box<Node>) -> Result<Value, String> {
-    match *node.value {
-        NodeType::Operator(ref op) => match op {
-            Operator::Add { .. } => add_expr(state, node),
-            Operator::And { .. } => and_expr(state, node),
-            Operator::Div { .. } => div_expr(state, node),
-            Operator::EqEq { .. } => eqeq_expr(state, node),
-            Operator::Gt { .. } => gt_expr(state, node),
-            Operator::Gte { .. } => gte_expr(state, node),
-            Operator::Lt { .. } => lt_expr(state, node),
-            Operator::Lte { .. } => lte_expr(state, node),
-            Operator::Mod { .. } => mod_expr(state, node),
-            Operator::Mul { .. } => mul_expr(state, node),
-            Operator::Neq { .. } => neq_expr(state, node),
-            Operator::Not(_) => not_expr(state, node),
-            Operator::Or { .. } => or_expr(state, node),
-            Operator::Pow { .. } => pow_expr(state, node),
-            Operator::Sub { .. } => sub_expr(state, node),
-            Operator::UnarySub(_) => unary_sub_expr(state, node),
-        },
-        NodeType::Literal(ref _literal) => literal_expr(node),
-        NodeType::Ident(_) => ident_expr(state, node),
-        NodeType::Declaration(_) => unreachable!(),
+fn expression(state: &State, node: Expr) -> Result<Value, String> {
+    match node {
+        Expr::Ident { .. } => ident_expr(state, node),
+        Expr::Number { .. } => literal_expr(node),
+        Expr::String { .. } => todo!(),
+        Expr::Boolean { .. } => literal_expr(node),
+        Expr::Call { .. } => todo!(),
+        Expr::Not { .. } => not_expr(state, node),
+        Expr::UnarySub { .. } => unary_sub_expr(state, node),
+        Expr::Or { .. } => or_expr(state, node),
+        Expr::And { .. } => and_expr(state, node),
+        Expr::EqEq { .. } => eqeq_expr(state, node),
+        Expr::Neq { .. } => neq_expr(state, node),
+        Expr::Gt { .. } => gt_expr(state, node),
+        Expr::Gte { .. } => gte_expr(state, node),
+        Expr::Lt { .. } => lt_expr(state, node),
+        Expr::Lte { .. } => lte_expr(state, node),
+        Expr::Mod { .. } => mod_expr(state, node),
+        Expr::Sub { .. } => sub_expr(state, node),
+        Expr::Add { .. } => add_expr(state, node),
+        Expr::Div { .. } => div_expr(state, node),
+        Expr::Mul { .. } => mul_expr(state, node),
+        Expr::Pow { .. } => pow_expr(state, node),
+        Expr::IfElse { .. } => todo!(),
+        Expr::Block { .. } => todo!(),
     }
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -117,9 +152,12 @@ macro_rules! create_unary_expr {
         $type:ident$(::$type_rest:ident)*,
         $func:ident$(::$func_rest:ident)* $(,)?
     ) => {
-        fn $func_name(state: &State, node: Box<Node>) -> Result<Value, String> {
-            if let NodeType::Operator($op$(::$op_rest)* (body)) = *node.value {
-                let body = expression(state, body)?;
+        fn $func_name(state: &State, node: Expr) -> Result<Value, String> {
+            if let Expr::$op {
+                operand,
+                ..
+            } = node {
+                let body = expression(state, *operand)?;
                 match body {
                     $type$(::$type_rest)*(body) => Ok($type$(::$type_rest)*($func$(::$func_rest)*(body))),
                     body => Err(format!(
@@ -135,16 +173,10 @@ macro_rules! create_unary_expr {
 }
 
 const NOT: fn(bool) -> bool = |x| !x;
-create_unary_expr!(not_expr, Operator::Not, "not", Value::Bool, NOT);
+create_unary_expr!(not_expr, Not, "not", Value::Bool, NOT);
 
 const UNARY_SUB: fn(f64) -> f64 = |x| -x;
-create_unary_expr!(
-    unary_sub_expr,
-    Operator::UnarySub,
-    "-",
-    Value::Num,
-    UNARY_SUB
-);
+create_unary_expr!(unary_sub_expr, UnarySub, "-", Value::Num, UNARY_SUB);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // BINARY EXPRESSIONS //////////////////////////////////////////////////////////////////////////////
@@ -159,10 +191,10 @@ macro_rules! create_binary_expr {
         $return_type:ident$(::$return_rest:ident)*,
         $func:ident$(::$func_rest:ident)* $(,)?
     ) => {
-        fn $func_name(state: &State, node: Box<Node>) -> Result<Value, String> {
-            if let NodeType::Operator($op$(::$op_rest)* { left, right }) = *node.value {
-                let left = expression(state, left)?;
-                let right = expression(state, right)?;
+        fn $func_name(state: &State, node: Expr) -> Result<Value, String> {
+            if let Expr::$op { left, right, .. } = node {
+                let left = expression(state, *left)?;
+                let right = expression(state, *right)?;
                 match (left, right) {
                     ($param_type$(::$param_type_rest)*(left), $param_type$(::$param_type_rest)*(right)) =>
                         Ok($return_type$(::$return_rest)*($func$(::$func_rest)*(left,right))),
@@ -204,67 +236,65 @@ macro_rules! create_binary_expr {
 }
 
 const OR: fn(bool, bool) -> bool = |l, r| l || r;
-create_binary_expr!(or_expr, Operator::Or, "or", Value::Bool, OR);
+create_binary_expr!(or_expr, Or, "or", Value::Bool, OR);
 
 const AND: fn(bool, bool) -> bool = |l, r| l && r;
-create_binary_expr!(and_expr, Operator::And, "and", Value::Bool, AND);
+create_binary_expr!(and_expr, And, "and", Value::Bool, AND);
 
 const EQ: fn(f64, f64) -> bool = |l, r| l == r;
-create_binary_expr!(eqeq_expr, Operator::EqEq, "==", Value::Num, Value::Bool, EQ);
+create_binary_expr!(eqeq_expr, EqEq, "==", Value::Num, Value::Bool, EQ);
 
 const NEQ: fn(f64, f64) -> bool = |l, r| l != r;
-create_binary_expr!(neq_expr, Operator::Neq, "!=", Value::Num, Value::Bool, NEQ);
+create_binary_expr!(neq_expr, Neq, "!=", Value::Num, Value::Bool, NEQ);
 
 const GT: fn(f64, f64) -> bool = |l, r| l > r;
-create_binary_expr!(gt_expr, Operator::Gt, ">", Value::Num, Value::Bool, GT);
+create_binary_expr!(gt_expr, Gt, ">", Value::Num, Value::Bool, GT);
 
 const GTE: fn(f64, f64) -> bool = |l, r| l >= r;
-create_binary_expr!(gte_expr, Operator::Gte, ">=", Value::Num, Value::Bool, GTE);
+create_binary_expr!(gte_expr, Gte, ">=", Value::Num, Value::Bool, GTE);
 
 const LT: fn(f64, f64) -> bool = |l, r| l < r;
-create_binary_expr!(lt_expr, Operator::Lt, "<", Value::Num, Value::Bool, LT);
+create_binary_expr!(lt_expr, Lt, "<", Value::Num, Value::Bool, LT);
 
 const LTE: fn(f64, f64) -> bool = |l, r| l <= r;
-create_binary_expr!(lte_expr, Operator::Lte, "<=", Value::Num, Value::Bool, LTE);
+create_binary_expr!(lte_expr, Lte, "<=", Value::Num, Value::Bool, LTE);
 
 const MOD: fn(f64, f64) -> f64 = |l, r| l.rem_euclid(r);
-create_binary_expr!(mod_expr, Operator::Mod, "%", Value::Num, MOD);
+create_binary_expr!(mod_expr, Mod, "%", Value::Num, MOD);
 
 const SUB: fn(f64, f64) -> f64 = |l, r| l - r;
-create_binary_expr!(sub_expr, Operator::Sub, "-", Value::Num, SUB);
+create_binary_expr!(sub_expr, Sub, "-", Value::Num, SUB);
 
 const ADD: fn(f64, f64) -> f64 = |l, r| l + r;
-create_binary_expr!(add_expr, Operator::Add, "+", Value::Num, ADD);
+create_binary_expr!(add_expr, Add, "+", Value::Num, ADD);
 
 const MUL: fn(f64, f64) -> f64 = |l, r| l * r;
-create_binary_expr!(mul_expr, Operator::Mul, "*", Value::Num, MUL,);
+create_binary_expr!(mul_expr, Mul, "*", Value::Num, MUL,);
 
 const DIV: fn(f64, f64) -> f64 = |l, r| l / r;
-create_binary_expr!(div_expr, Operator::Div, "/", Value::Num, DIV);
+create_binary_expr!(div_expr, Div, "/", Value::Num, DIV);
 
 const POW: fn(f64, f64) -> f64 = |l, r| l.powf(r);
-create_binary_expr!(pow_expr, Operator::Pow, "**", Value::Num, POW);
+create_binary_expr!(pow_expr, Pow, "**", Value::Num, POW);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // LITERAL EXPRESSIONS /////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-fn literal_expr(node: Box<Node>) -> Result<Value, String> {
-    if let NodeType::Literal(val) = *node.value {
-        match val {
-            Literal::Number(n) => Ok(Value::Num(n)),
-            Literal::Boolean(b) => Ok(Value::Bool(b)),
-        }
-    } else {
-        panic!("literal_expr should receive Literal, but got {:?}", node);
+fn literal_expr(node: Expr) -> Result<Value, String> {
+    match node {
+        Expr::Number { val, .. } => Ok(Value::Num(val)),
+        Expr::String { .. } => todo!(),
+        Expr::Boolean { val, .. } => Ok(Value::Bool(val)),
+        _ => panic!("literal_expr should receive Literal, but got {:?}", node),
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // LITERAL EXPRESSIONS /////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-fn ident_expr(state: &State, node: Box<Node>) -> Result<Value, String> {
-    if let NodeType::Ident(id) = *node.value {
-        expression(state, Box::new(state[&id].clone()))
+fn ident_expr(state: &State, node: Expr) -> Result<Value, String> {
+    if let Expr::Ident { val, .. } = node {
+        expression(state, state[&val].clone())
     } else {
         panic!("ident_expr should receive Ident, but got {:?}", node);
     }

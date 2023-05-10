@@ -1,5 +1,5 @@
 use crate::{
-    ast::*,
+    ast::{Decl, Expr},
     err_msg,
     error::{Coords, Position},
     token::{Token, TokenType},
@@ -61,12 +61,12 @@ impl Parser {
 
 const EOF_ERROR: &'static str = "unexpected end of file";
 
-pub fn parse(tokens: Vec<Token>) -> Result<Vec<Node>, String> {
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Decl>, String> {
     let mut parser = Parser::new(tokens);
     declarations(&mut parser)
 }
 
-pub(crate) fn declarations(parser: &mut Parser) -> Result<Vec<Node>, String> {
+pub(crate) fn declarations(parser: &mut Parser) -> Result<Vec<Decl>, String> {
     let mut acc = vec![];
     loop {
         match declaration(parser) {
@@ -81,11 +81,11 @@ pub(crate) fn declarations(parser: &mut Parser) -> Result<Vec<Node>, String> {
     }
 }
 
-pub(crate) fn declaration(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn declaration(parser: &mut Parser) -> Result<Decl, String> {
     assignment_declaration(parser).or_else(|_| expression_declaration(parser))
 }
 
-pub(crate) fn expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn expression(parser: &mut Parser) -> Result<Expr, String> {
     binary_expression(parser)
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn expression(parser: &mut Parser) -> Result<Node, String> {
 // DECLARATIONS ////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn assignment_declaration(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn assignment_declaration(parser: &mut Parser) -> Result<Decl, String> {
     // let `id` = `expr`
     // ^^^
     let r#let = parser.consume_token_of_type(TokenType::Let)?;
@@ -110,37 +110,34 @@ pub(crate) fn assignment_declaration(parser: &mut Parser) -> Result<Node, String
     //            ^^^^^^
     let value = expression(parser)?;
 
-    let end = value.position.end;
-    Ok(Node::new(
-        NodeType::Declaration(Declaration::Assignment {
-            id: identifier.value,
-            body: Box::new(value),
-        }),
-        Position::new(r#let.coords, end),
-    ))
+    let end = value.position().end;
+    Ok(Decl::Assignment {
+        id: identifier.value,
+        body: Box::new(value),
+        position: Position::new(r#let.coords, end),
+    })
 }
 
-pub(crate) fn expression_declaration(parser: &mut Parser) -> Result<Node, String> {
-    expression(parser)
+pub(crate) fn expression_declaration(parser: &mut Parser) -> Result<Decl, String> {
+    Ok(Decl::Expression(expression(parser)?))
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // BINARY EXPRESSIONS //////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn binary_expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn binary_expression(parser: &mut Parser) -> Result<Expr, String> {
     or_binary_expression(parser)
 }
 
 macro_rules! binary_expression_parser {
     ($func_name:ident, $below:ident, $tok_type:path, $op_type:ident$(::$rest:ident)* $(,)?) => {
-        fn $func_name(parser: &mut Parser) -> Result<Node, String> {
+        fn $func_name(parser: &mut Parser) -> Result<Expr, String> {
             let left = $below(parser)?;
 
             match parser.first() {
                 Ok(Token {
-                    r#type: $tok_type,
-                    ..
+                    r#type: $tok_type, ..
                 }) => parser.consume_first(),
                 Ok(_) => return Ok(left),
                 Err(e) if e == String::from(EOF_ERROR) => return Ok(left),
@@ -148,15 +145,13 @@ macro_rules! binary_expression_parser {
             }
 
             let right = $func_name(parser)?;
-            let left_pos = left.position;
-            let right_pos = right.position;
-            Ok(Node::new(
-                NodeType::Operator($op_type$(::$rest)* {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }),
-                Position::new(left_pos.start, right_pos.end),
-            ))
+            let left_pos = left.position();
+            let right_pos = right.position();
+            Ok(Expr::$op_type {
+                left: Box::new(left),
+                right: Box::new(right),
+                position: Position::new(left_pos.start, right_pos.end),
+            })
         }
     };
 }
@@ -166,14 +161,14 @@ binary_expression_parser!(
     or_binary_expression,
     and_binary_expression,
     TokenType::Or,
-    Operator::Or,
+    Or,
 );
 
 binary_expression_parser!(
     and_binary_expression,
     comparative_expression,
     TokenType::And,
-    Operator::And
+    And
 );
 
 // COMPARATIVE EXPRESSIONS /////////////////////////////////////////////////////////////////////////
@@ -181,48 +176,44 @@ macro_rules! consume_right_and_create_node {
     (
         $parser:ident, $left:ident,
         $op_type:ident$(::$op_type_rest:ident)* $(,)?
-    ) => {
-            {
-                $parser.consume_first();
-                let right = modulo_binary_expression($parser)?;
-                let (l_pos, r_pos) = ($left.position.start, right.position.end);
-                Ok(Node::new(
-                    NodeType::Operator($op_type$(::$op_type_rest)* {
-                        left: Box::new($left),
-                        right: Box::new(right),
-                    }),
-                    Position::new(l_pos, r_pos),
-                ))
-            }
-    };
+    ) => {{
+        $parser.consume_first();
+        let right = modulo_binary_expression($parser)?;
+        let (l_pos, r_pos) = ($left.position().start, right.position().end);
+        Ok(Expr::$op_type {
+            left: Box::new($left),
+            right: Box::new(right),
+            position: Position::new(l_pos, r_pos),
+        })
+    }};
 }
-fn comparative_expression(parser: &mut Parser) -> Result<Node, String> {
+fn comparative_expression(parser: &mut Parser) -> Result<Expr, String> {
     let left = modulo_binary_expression(parser)?;
     match parser.first() {
         Ok(Token {
             r#type: TokenType::EqEq,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::EqEq),
+        }) => consume_right_and_create_node!(parser, left, EqEq),
         Ok(Token {
             r#type: TokenType::Neq,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::Neq),
+        }) => consume_right_and_create_node!(parser, left, Neq),
         Ok(Token {
             r#type: TokenType::Gt,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::Gt),
+        }) => consume_right_and_create_node!(parser, left, Gt),
         Ok(Token {
             r#type: TokenType::Gte,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::Gte),
+        }) => consume_right_and_create_node!(parser, left, Gte),
         Ok(Token {
             r#type: TokenType::Lt,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::Lt),
+        }) => consume_right_and_create_node!(parser, left, Lt),
         Ok(Token {
             r#type: TokenType::Lte,
             ..
-        }) => consume_right_and_create_node!(parser, left, Operator::Lte),
+        }) => consume_right_and_create_node!(parser, left, Lte),
         Ok(_) => Ok(left),
         Err(e) if e == String::from(EOF_ERROR) => Ok(left),
         Err(_) => unreachable!(),
@@ -234,42 +225,42 @@ binary_expression_parser!(
     modulo_binary_expression,
     minus_binary_expression,
     TokenType::Mod,
-    Operator::Mod,
+    Mod,
 );
 
 binary_expression_parser!(
     minus_binary_expression,
     add_binary_expression,
     TokenType::Sub,
-    Operator::Sub,
+    Sub,
 );
 
 binary_expression_parser!(
     add_binary_expression,
     star_binary_expression,
     TokenType::Add,
-    Operator::Add,
+    Add,
 );
 
 binary_expression_parser!(
     star_binary_expression,
     divide_binary_expression,
     TokenType::Mul,
-    Operator::Mul,
+    Mul,
 );
 
 binary_expression_parser!(
     divide_binary_expression,
     exponent_binary_expression,
     TokenType::Div,
-    Operator::Div,
+    Div,
 );
 
 binary_expression_parser!(
     exponent_binary_expression,
     not_unary_expression,
     TokenType::Pow,
-    Operator::Pow,
+    Pow,
 );
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -278,7 +269,7 @@ binary_expression_parser!(
 
 macro_rules! unary_expression_parser {
     ($func_name:ident, $below:ident, $tok_type:path, $op_type:ident$(::$rest:ident)* $(,)?) => {
-        fn $func_name(parser: &mut Parser) -> Result<Node, String> {
+        fn $func_name(parser: &mut Parser) -> Result<Expr, String> {
             let left_pos;
             match parser.first() {
                 Ok(Token {
@@ -295,11 +286,11 @@ macro_rules! unary_expression_parser {
             }
 
             let right = $func_name(parser)?;
-            let right_pos = right.position;
-            Ok(Node::new(
-                NodeType::Operator($op_type$(::$rest)*(Box::new(right))),
-                Position::new(left_pos, right_pos.end),
-            ))
+            let right_pos = right.position();
+            Ok(Expr::$op_type {
+                operand: Box::new(right),
+                position: Position::new(left_pos, right_pos.end),
+            })
         }
     };
 }
@@ -308,21 +299,21 @@ unary_expression_parser!(
     not_unary_expression,
     minus_unary_expression,
     TokenType::Not,
-    Operator::Not,
+    Not,
 );
 
 unary_expression_parser!(
     minus_unary_expression,
     value_expression,
     TokenType::Sub,
-    Operator::UnarySub,
+    UnarySub,
 );
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // VALUE EXPRESSIONS ///////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn value_expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn value_expression(parser: &mut Parser) -> Result<Expr, String> {
     match parser.first()? {
         Token {
             r#type: TokenType::LeftParen,
@@ -340,7 +331,7 @@ pub(crate) fn value_expression(parser: &mut Parser) -> Result<Node, String> {
     }
 }
 
-pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Expr, String> {
     let Token { coords, .. } = parser.consume_token_of_type(TokenType::LeftParen)?;
     // Check that expr has a body
     match parser.first() {
@@ -364,7 +355,7 @@ pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Node, Stri
     Ok(body)
 }
 
-pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Expr, String> {
     match parser.first()? {
         Token {
             r#type: TokenType::Number,
@@ -372,10 +363,13 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
             coords: Coords { line, column },
         } => {
             parser.consume_first();
-            Ok(Node::new(
-                NodeType::Literal(Literal::Number(value.parse::<f64>().unwrap())),
-                Position::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
-            ))
+            Ok(Expr::Number {
+                val: value.parse::<f64>().unwrap(),
+                position: Position::from_tuples(
+                    (line, column),
+                    (line, column + (value.len() as u16 - 1)),
+                ),
+            })
         }
         Token {
             r#type: TokenType::True | TokenType::False,
@@ -383,10 +377,13 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
             coords: Coords { line, column },
         } => {
             parser.consume_first();
-            Ok(Node::new(
-                NodeType::Literal(Literal::Boolean(value == "true")),
-                Position::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
-            ))
+            Ok(Expr::Boolean {
+                val: value == "true",
+                position: Position::from_tuples(
+                    (line, column),
+                    (line, column + (value.len() as u16 - 1)),
+                ),
+            })
         }
         Token {
             r#type,
@@ -404,13 +401,13 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Node, String> {
     }
 }
 
-pub(crate) fn ident_expression(parser: &mut Parser) -> Result<Node, String> {
+pub(crate) fn ident_expression(parser: &mut Parser) -> Result<Expr, String> {
     let token = parser.consume_token_of_type(TokenType::Ident)?;
     let end_coords = token.end_coords();
-    Ok(Node::new(
-        NodeType::Ident(token.value),
-        Position::new(token.coords, end_coords),
-    ))
+    Ok(Expr::Ident {
+        val: token.value,
+        position: Position::new(token.coords, end_coords),
+    })
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -422,131 +419,113 @@ mod tests {
     use crate::{parse::*, token};
     #[test]
     fn star_expression() {
-        let expected: Result<Node, String> = Ok(Node::new(
-            NodeType::Operator(Operator::Mul {
-                left: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(12.)),
-                    Position::from_tuples((1, 1), (1, 2)),
-                )),
-                right: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(42.)),
-                    Position::from_tuples((1, 6), (1, 7)),
-                )),
+        let expected = Ok(Expr::Mul {
+            left: Box::new(Expr::Number {
+                val: 12.,
+                position: Position::from_tuples((1, 1), (1, 2)),
             }),
-            Position::from_tuples((1, 1), (1, 7)),
-        ));
+            right: Box::new(Expr::Number {
+                val: 42.,
+                position: Position::from_tuples((1, 6), (1, 7)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 7)),
+        });
         let mut input = Parser::new(token::tokenize("12 * 42"));
         assert_eq!(binary_expression(&mut input), expected);
     }
 
     #[test]
     fn divide_expression() {
-        let expected: Result<Node, String> = Ok(Node::new(
-            NodeType::Operator(Operator::Div {
-                left: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(12.)),
-                    Position::from_tuples((1, 1), (1, 2)),
-                )),
-                right: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(42.)),
-                    Position::from_tuples((1, 6), (1, 7)),
-                )),
+        let expected = Ok(Expr::Div {
+            left: Box::new(Expr::Number {
+                val: 12.,
+                position: Position::from_tuples((1, 1), (1, 2)),
             }),
-            Position::from_tuples((1, 1), (1, 7)),
-        ));
+            right: Box::new(Expr::Number {
+                val: 42.,
+                position: Position::from_tuples((1, 6), (1, 7)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 7)),
+        });
         let mut input = Parser::new(token::tokenize("12 / 42"));
         assert_eq!(binary_expression(&mut input), expected);
     }
 
     #[test]
-    fn multiple_star_expression() {
-        let expected: Result<Node, String> = Ok(Node::new(
-            NodeType::Operator(Operator::Mul {
-                left: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(12.)),
-                    Position::from_tuples((1, 1), (1, 2)),
-                )),
-                right: Box::new(Node::new(
-                    NodeType::Operator(Operator::Mul {
-                        left: Box::new(Node::new(
-                            NodeType::Literal(Literal::Number(42.)),
-                            Position::from_tuples((1, 6), (1, 7)),
-                        )),
-                        right: Box::new(Node::new(
-                            NodeType::Literal(Literal::Number(32.)),
-                            Position::from_tuples((1, 11), (1, 12)),
-                        )),
-                    }),
-                    Position::from_tuples((1, 6), (1, 12)),
-                )),
-            }),
-            Position::from_tuples((1, 1), (1, 12)),
-        ));
-        let mut input = Parser::new(token::tokenize("12 * 42 * 32"));
-        assert_eq!(binary_expression(&mut input), expected);
-    }
-
-    #[test]
     fn minus_expression() {
-        let expected: Result<Node, String> = Ok(Node::new(
-            NodeType::Operator(Operator::Sub {
-                left: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(12.)),
-                    Position::from_tuples((1, 1), (1, 2)),
-                )),
-                right: Box::new(Node::new(
-                    NodeType::Literal(Literal::Number(42.)),
-                    Position::from_tuples((1, 6), (1, 7)),
-                )),
+        let expected = Ok(Expr::Mul {
+            left: Box::new(Expr::Number {
+                val: 12.,
+                position: Position::from_tuples((1, 1), (1, 2)),
             }),
-            Position::from_tuples((1, 1), (1, 7)),
-        ));
+            right: Box::new(Expr::Number {
+                val: 42.,
+                position: Position::from_tuples((1, 1), (1, 2)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 12)),
+        });
         let mut input = Parser::new(token::tokenize("12 - 42"));
         assert_eq!(binary_expression(&mut input), expected);
     }
 
     #[test]
-    fn order_binary_expression() {
-        let expected: Result<Node, String> = Ok(Node::new(
-            NodeType::Operator(Operator::Sub {
-                left: Node::new_boxed(
-                    NodeType::Operator(Operator::Add {
-                        left: Node::new_boxed(
-                            NodeType::Literal(Literal::Number(2.)),
-                            Position::from_tuples((1, 1), (1, 1)),
-                        ),
-                        right: Node::new_boxed(
-                            NodeType::Literal(Literal::Number(3.)),
-                            Position::from_tuples((1, 5), (1, 5)),
-                        ),
-                    }),
-                    Position::from_tuples((1, 1), (1, 5)),
-                ),
-                right: Node::new_boxed(
-                    NodeType::Operator(Operator::Mul {
-                        left: Node::new_boxed(
-                            NodeType::Operator(Operator::Div {
-                                left: Node::new_boxed(
-                                    NodeType::Literal(Literal::Number(4.)),
-                                    Position::from_tuples((1, 9), (1, 9)),
-                                ),
-                                right: Node::new_boxed(
-                                    NodeType::Literal(Literal::Number(5.)),
-                                    Position::from_tuples((1, 13), (1, 13)),
-                                ),
-                            }),
-                            Position::from_tuples((1, 9), (1, 13)),
-                        ),
-                        right: Node::new_boxed(
-                            NodeType::Literal(Literal::Number(6.)),
-                            Position::from_tuples((1, 17), (1, 17)),
-                        ),
-                    }),
-                    Position::from_tuples((1, 9), (1, 17)),
-                ),
+    fn multiple_star_expression() {
+        let expected = Ok(Expr::Mul {
+            left: Box::new(Expr::Number {
+                val: 12.,
+                position: Position::from_tuples((1, 1), (1, 2)),
             }),
-            Position::from_tuples((1, 1), (1, 17)),
-        ));
+            right: Box::new(Expr::Mul {
+                left: Box::new(Expr::Number {
+                    val: 42.,
+                    position: Position::from_tuples((1, 6), (1, 7)),
+                }),
+                right: Box::new(Expr::Number {
+                    val: 32.,
+                    position: Position::from_tuples((1, 11), (1, 12)),
+                }),
+                position: Position::from_tuples((1, 6), (1, 12)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 12)),
+        });
+        let mut input = Parser::new(token::tokenize("12 * 42 * 32"));
+        assert_eq!(binary_expression(&mut input), expected);
+    }
+
+    #[test]
+    fn order_binary_expression() {
+        let expected = Ok(Expr::Sub {
+            left: Box::new(Expr::Add {
+                left: Box::new(Expr::Number {
+                    val: 2.,
+                    position: Position::from_tuples((1, 1), (1, 1)),
+                }),
+                right: Box::new(Expr::Number {
+                    val: 3.,
+                    position: Position::from_tuples((1, 5), (1, 5)),
+                }),
+                position: Position::from_tuples((1, 1), (1, 5)),
+            }),
+            right: Box::new(Expr::Mul {
+                left: Box::new(Expr::Div {
+                    left: Box::new(Expr::Number {
+                        val: 4.,
+                        position: Position::from_tuples((1, 9), (1, 9)),
+                    }),
+                    right: Box::new(Expr::Number {
+                        val: 5.,
+                        position: Position::from_tuples((1, 13), (1, 13)),
+                    }),
+                    position: Position::from_tuples((1, 9), (1, 13)),
+                }),
+                right: Box::new(Expr::Number {
+                    val: 6.,
+                    position: Position::from_tuples((1, 17), (1, 17)),
+                }),
+                position: Position::from_tuples((1, 13), (1, 17)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 17)),
+        });
         let mut input = Parser::new(token::tokenize("2 + 3 - 4 / 5 * 6")); // should be (2 + 3) - ((4 / 5) * 6)
         let result = binary_expression(&mut input);
         assert_eq!(result, expected);
@@ -555,54 +534,50 @@ mod tests {
     #[test]
     fn parenthesized_expression() {
         let input = "(2 + 3) * 3";
-        let expected = Node::new(
-            NodeType::Operator(Operator::Mul {
-                left: Node::new_boxed(
-                    NodeType::Operator(Operator::Add {
-                        left: Node::new_boxed(
-                            NodeType::Literal(Literal::Number(2.)),
-                            Position::from_tuples((1, 2), (1, 2)),
-                        ),
-                        right: Node::new_boxed(
-                            NodeType::Literal(Literal::Number(3.)),
-                            Position::from_tuples((1, 6), (1, 6)),
-                        ),
-                    }),
-                    Position::from_tuples((1, 2), (1, 6)),
-                ),
-                right: Node::new_boxed(
-                    NodeType::Literal(Literal::Number(3.)),
-                    Position::from_tuples((1, 11), (1, 11)),
-                ),
+        let expected = Ok(Expr::Mul {
+            left: Box::new(Expr::Add {
+                left: Box::new(Expr::Number {
+                    val: 2.,
+                    position: Position::from_tuples((1, 2), (1, 2)),
+                }),
+                right: Box::new(Expr::Number {
+                    val: 3.,
+                    position: Position::from_tuples((1, 6), (1, 6)),
+                }),
+                position: Position::from_tuples((1, 1), (1, 7)),
             }),
-            Position::from_tuples((1, 2), (1, 11)),
-        );
-        assert_eq!(parse(token::tokenize(input)).unwrap(), vec![expected]);
+            right: Box::new(Expr::Number {
+                val: 3.,
+                position: Position::from_tuples((1, 11), (1, 11)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 11)),
+        });
+        let mut input = Parser::new(token::tokenize(input));
+        assert_eq!(expression(&mut input), expected);
     }
 
     #[test]
     fn unary_minus() {
         let input = "- 32 - - 23";
-        let expected = Node::new(
-            NodeType::Operator(Operator::Sub {
-                left: Node::new_boxed(
-                    NodeType::Operator(Operator::UnarySub(Node::new_boxed(
-                        NodeType::Literal(Literal::Number(32.)),
-                        Position::from_tuples((1, 3), (1, 4)),
-                    ))),
-                    Position::from_tuples((1, 1), (1, 4)),
-                ),
-                right: Node::new_boxed(
-                    NodeType::Operator(Operator::UnarySub(Node::new_boxed(
-                        NodeType::Literal(Literal::Number(23.)),
-                        Position::from_tuples((1, 10), (1, 11)),
-                    ))),
-                    Position::from_tuples((1, 8), (1, 11)),
-                ),
+        let expected = Ok(Expr::Sub {
+            left: Box::new(Expr::UnarySub {
+                operand: Box::new(Expr::Number {
+                    val: 32.,
+                    position: Position::from_tuples((1, 3), (1, 4)),
+                }),
+                position: Position::from_tuples((1, 1), (1, 4)),
             }),
-            Position::from_tuples((1, 1), (1, 11)),
-        );
+            right: Box::new(Expr::UnarySub {
+                operand: Box::new(Expr::Number {
+                    val: 23.,
+                    position: Position::from_tuples((1, 10), (1, 11)),
+                }),
+                position: Position::from_tuples((1, 8), (1, 11)),
+            }),
+            position: Position::from_tuples((1, 1), (1, 11)),
+        });
 
-        assert_eq!(parse(token::tokenize(input)).unwrap(), vec![expected]);
+        let mut input = Parser::new(token::tokenize(input));
+        assert_eq!(expression(&mut input), expected);
     }
 }
