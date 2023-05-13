@@ -11,12 +11,12 @@ impl Coords {
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct Position {
+pub struct Span {
     pub start: Coords,
     pub end: Coords,
 }
 
-impl Position {
+impl Span {
     pub fn new(start: Coords, end: Coords) -> Self {
         Self { start, end }
     }
@@ -31,8 +31,9 @@ impl Position {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Error {
+    // kind: ErrorKind,
     message: String,
-    position: Position,
+    position: Span,
     context: Vec<String>,
 }
 

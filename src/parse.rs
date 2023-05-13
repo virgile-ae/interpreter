@@ -1,8 +1,11 @@
 use crate::{
-    ast::{Decl, Expr},
+    ast::Expr,
     err_msg,
-    error::{Coords, Position},
-    token::{Token, TokenType},
+    error::{Coords, Span},
+    token::{
+        Token,
+        TokenKind::{self, *},
+    },
 };
 
 #[derive(Debug)]
@@ -28,22 +31,26 @@ impl Parser {
         self.tokens.iter().nth(self.index - 1)
     }
 
-    fn consume_first(&mut self) {
+    fn bump(&mut self) {
         self.index += 1;
     }
 
-    fn consume_token_of_type(&mut self, tok_type: TokenType) -> Result<Token, String> {
+    fn is_token_of_kind(&mut self, kind: TokenKind) -> bool {
+        self.first().map(|tok| tok.kind == kind).unwrap_or(false)
+    }
+
+    fn consume_token_of_kind(&mut self, kind: TokenKind) -> Result<Token, String> {
         match self.first() {
             Ok(Token {
-                r#type,
+                kind,
                 value,
                 coords,
-            }) if r#type == tok_type => {
-                self.consume_first();
-                Ok(Token::new(r#type, value, coords))
+            }) if kind == kind => {
+                self.bump();
+                Ok(Token::new(kind, value, coords))
             }
             Ok(Token { value, coords, .. }) => {
-                let tok_str = tok_type.to_string();
+                let tok_str = kind.to_string();
                 err_msg!(coords, "expected `{}`, but got `{}`", tok_str, value)
             }
             Err(e) if e == String::from(EOF_ERROR) => {
@@ -51,83 +58,156 @@ impl Parser {
                     Some(Token { coords, .. }) => *coords,
                     None => Coords::new(1, 1),
                 };
-                let tok_str = tok_type.to_string();
+                let tok_str = kind.to_string();
                 err_msg!(coords, "expected `{}`, but reached end of file", tok_str)
             }
             Err(_) => unreachable!(),
+        }
+    }
+
+    fn try_consume(&mut self, expected: TokenKind) -> Option<Token> {
+        match self.first() {
+            Ok(Token {
+                kind,
+                value,
+                coords,
+            }) if kind == expected => Some(Token {
+                kind,
+                value,
+                coords,
+            }),
+            _ => None,
         }
     }
 }
 
 const EOF_ERROR: &'static str = "unexpected end of file";
 
-pub fn parse(tokens: Vec<Token>) -> Result<Vec<Decl>, String> {
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expr>, String> {
     let mut parser = Parser::new(tokens);
-    declarations(&mut parser)
+    exprs(&mut parser)
 }
 
-pub(crate) fn declarations(parser: &mut Parser) -> Result<Vec<Decl>, String> {
+fn many_delimited_by(
+    parser: &mut Parser,
+    expr: fn(&mut Parser) -> Result<Expr, String>,
+    delimiter: TokenKind,
+) -> Result<Vec<Expr>, String> {
     let mut acc = vec![];
     loop {
-        match declaration(parser) {
-            Ok(x) => acc.push(x),
+        match expr(parser) {
+            Ok(val) => {
+                acc.push(val);
+                if parser.is_token_of_kind(delimiter) {
+                    parser.consume_token_of_kind(delimiter)?;
+                } else {
+                    return Ok(acc);
+                }
+            }
             Err(e) if e == EOF_ERROR => return Ok(acc),
             Err(e) => return Err(e),
-        }
-        match parser.consume_token_of_type(TokenType::NewLine) {
-            Ok(_) => (),
-            Err(_) => return Ok(acc),
         }
     }
 }
 
-pub(crate) fn declaration(parser: &mut Parser) -> Result<Decl, String> {
-    assignment_declaration(parser).or_else(|_| expression_declaration(parser))
-}
-
-pub(crate) fn expression(parser: &mut Parser) -> Result<Expr, String> {
-    binary_expression(parser)
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// DECLARATIONS ////////////////////////////////////////////////////////////////////////////////////
+// EXPRESSIONS /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn assignment_declaration(parser: &mut Parser) -> Result<Decl, String> {
+fn exprs(parser: &mut Parser) -> Result<Vec<Expr>, String> {
+    many_delimited_by(parser, expr, Semicolon)
+}
+
+fn expr(parser: &mut Parser) -> Result<Expr, String> {
+    match parser.first()?.kind {
+        If => if_else_expr(parser),
+        LeftBrace => block_expr(parser),
+        Let => assignment_expr(parser),
+        Bar => func_expr(parser),
+        _ => binary_expr(parser),
+    }
+}
+
+// ASSIGNMENT DECLERATION //////////////////////////////////////////////////////////////////////////
+fn assignment_expr(parser: &mut Parser) -> Result<Expr, String> {
     // let `id` = `expr`
     // ^^^
-    let r#let = parser.consume_token_of_type(TokenType::Let)?;
+    let r#let = parser.consume_token_of_kind(Let)?.coords;
 
     // let `id` = `expr`
     //     ^^^^
-    let identifier = parser.consume_token_of_type(TokenType::Ident)?;
+    let identifier = parser.consume_token_of_kind(Ident)?;
 
     // let `id` = `expr`
     //          ^
-    parser.consume_token_of_type(TokenType::Eq)?;
+    parser.consume_token_of_kind(Eq)?;
 
     // let `id` = `expr`
     //            ^^^^^^
-    let value = expression(parser)?;
+    let value = expr(parser)?;
 
     let end = value.position().end;
-    Ok(Decl::Assignment {
+    Ok(Expr::Assignment {
         id: identifier.value,
         body: Box::new(value),
-        position: Position::new(r#let.coords, end),
+        span: Span::new(r#let, end),
     })
 }
 
-pub(crate) fn expression_declaration(parser: &mut Parser) -> Result<Decl, String> {
-    Ok(Decl::Expression(expression(parser)?))
+// IF EXPRESSION ///////////////////////////////////////////////////////////////////////////////////
+fn if_else_expr(parser: &mut Parser) -> Result<Expr, String> {
+    // if `expr` { `block` } else { `block` }
+    // ^^
+    let r#if = parser.consume_token_of_kind(If)?;
+
+    // if `expr` { `block` } else { `block` }
+    //    ^^^^^^
+    let cond = Box::new(expr(parser)?);
+
+    // if `expr` { `block` } else { `block` }
+    //           ^^^^^^^^^^^
+    let on_true = Box::new(block_expr(parser)?);
+
+    // if `expr` { `block` } else { `block` }
+    //                       ^^^^
+    parser.consume_token_of_kind(Else)?;
+
+    // if `expr` { `block` } else { `block` }
+    //                            ^^^^^^^^^^^
+    let on_false = Box::new(block_expr(parser)?);
+
+    let right_pos = on_false.position().end;
+    Ok(Expr::IfElse {
+        cond,
+        on_true,
+        on_false,
+        span: Span::new(r#if.coords, right_pos),
+    })
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// BINARY EXPRESSIONS //////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// BLOCK EXPRESSION ////////////////////////////////////////////////////////////////////////////////
+fn block_expr(parser: &mut Parser) -> Result<Expr, String> {
+    // { `exprs` }
+    // ^
+    let left_brace = parser.consume_token_of_kind(LeftBrace)?;
 
-pub(crate) fn binary_expression(parser: &mut Parser) -> Result<Expr, String> {
-    or_binary_expression(parser)
+    // { `exprs` }
+    //   ^^^^^^^
+    let expressions = exprs(parser)?;
+
+    // { `exprs` }
+    //           ^
+    let right_brace = parser.consume_token_of_kind(RightBrace)?;
+
+    Ok(Expr::Block {
+        exprs: expressions,
+        span: Span::new(left_brace.coords, right_brace.coords),
+    })
+}
+
+// BINARY EXPRESSIONS //////////////////////////////////////////////////////////////////////////////
+fn binary_expr(parser: &mut Parser) -> Result<Expr, String> {
+    or_expr(parser)
 }
 
 macro_rules! binary_expression_parser {
@@ -137,8 +217,8 @@ macro_rules! binary_expression_parser {
 
             match parser.first() {
                 Ok(Token {
-                    r#type: $tok_type, ..
-                }) => parser.consume_first(),
+                    kind: $tok_type, ..
+                }) => parser.bump(),
                 Ok(_) => return Ok(left),
                 Err(e) if e == String::from(EOF_ERROR) => return Ok(left),
                 Err(_) => unreachable!(),
@@ -150,122 +230,63 @@ macro_rules! binary_expression_parser {
             Ok(Expr::$op_type {
                 left: Box::new(left),
                 right: Box::new(right),
-                position: Position::new(left_pos.start, right_pos.end),
+                span: Span::new(left_pos.start, right_pos.end),
             })
         }
     };
 }
 
-// BOOLEAN EXPRESSIONS /////////////////////////////////////////////////////////////////////////////
-binary_expression_parser!(
-    or_binary_expression,
-    and_binary_expression,
-    TokenType::Or,
-    Or,
-);
+// BOOLEAN EXPRESSIONS
+binary_expression_parser!(or_expr, and_expr, Or, Or,);
 
-binary_expression_parser!(
-    and_binary_expression,
-    comparative_expression,
-    TokenType::And,
-    And
-);
+binary_expression_parser!(and_expr, comparative_expression, And, And);
 
-// COMPARATIVE EXPRESSIONS /////////////////////////////////////////////////////////////////////////
+// COMPARATIVE EXPRESSIONS
 macro_rules! consume_right_and_create_node {
     (
         $parser:ident, $left:ident,
         $op_type:ident$(::$op_type_rest:ident)* $(,)?
     ) => {{
-        $parser.consume_first();
-        let right = modulo_binary_expression($parser)?;
+        $parser.bump();
+        let right = mod_expr($parser)?;
         let (l_pos, r_pos) = ($left.position().start, right.position().end);
         Ok(Expr::$op_type {
             left: Box::new($left),
             right: Box::new(right),
-            position: Position::new(l_pos, r_pos),
+            span: Span::new(l_pos, r_pos),
         })
     }};
 }
+
 fn comparative_expression(parser: &mut Parser) -> Result<Expr, String> {
-    let left = modulo_binary_expression(parser)?;
+    let left = mod_expr(parser)?;
     match parser.first() {
-        Ok(Token {
-            r#type: TokenType::EqEq,
-            ..
-        }) => consume_right_and_create_node!(parser, left, EqEq),
-        Ok(Token {
-            r#type: TokenType::Neq,
-            ..
-        }) => consume_right_and_create_node!(parser, left, Neq),
-        Ok(Token {
-            r#type: TokenType::Gt,
-            ..
-        }) => consume_right_and_create_node!(parser, left, Gt),
-        Ok(Token {
-            r#type: TokenType::Gte,
-            ..
-        }) => consume_right_and_create_node!(parser, left, Gte),
-        Ok(Token {
-            r#type: TokenType::Lt,
-            ..
-        }) => consume_right_and_create_node!(parser, left, Lt),
-        Ok(Token {
-            r#type: TokenType::Lte,
-            ..
-        }) => consume_right_and_create_node!(parser, left, Lte),
+        Ok(Token { kind: EqEq, .. }) => consume_right_and_create_node!(parser, left, EqEq),
+        Ok(Token { kind: Neq, .. }) => consume_right_and_create_node!(parser, left, Neq),
+        Ok(Token { kind: Gt, .. }) => consume_right_and_create_node!(parser, left, Gt),
+        Ok(Token { kind: Gte, .. }) => consume_right_and_create_node!(parser, left, Gte),
+        Ok(Token { kind: Lt, .. }) => consume_right_and_create_node!(parser, left, Lt),
+        Ok(Token { kind: Lte, .. }) => consume_right_and_create_node!(parser, left, Lte),
         Ok(_) => Ok(left),
         Err(e) if e == String::from(EOF_ERROR) => Ok(left),
         Err(_) => unreachable!(),
     }
 }
 
-// ARITHMETIC EXPRESSIONS //////////////////////////////////////////////////////////////////////////
-binary_expression_parser!(
-    modulo_binary_expression,
-    minus_binary_expression,
-    TokenType::Mod,
-    Mod,
-);
+// ARITHMETIC EXPRESSIONS
+binary_expression_parser!(mod_expr, sub_expr, Mod, Mod,);
 
-binary_expression_parser!(
-    minus_binary_expression,
-    add_binary_expression,
-    TokenType::Sub,
-    Sub,
-);
+binary_expression_parser!(sub_expr, add_expr, Sub, Sub,);
 
-binary_expression_parser!(
-    add_binary_expression,
-    star_binary_expression,
-    TokenType::Add,
-    Add,
-);
+binary_expression_parser!(add_expr, mul_expr, Add, Add,);
 
-binary_expression_parser!(
-    star_binary_expression,
-    divide_binary_expression,
-    TokenType::Mul,
-    Mul,
-);
+binary_expression_parser!(mul_expr, div_expr, Mul, Mul,);
 
-binary_expression_parser!(
-    divide_binary_expression,
-    exponent_binary_expression,
-    TokenType::Div,
-    Div,
-);
+binary_expression_parser!(div_expr, pow_expr, Div, Div,);
 
-binary_expression_parser!(
-    exponent_binary_expression,
-    not_unary_expression,
-    TokenType::Pow,
-    Pow,
-);
+binary_expression_parser!(pow_expr, not_expr, Pow, Pow,);
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // UNARY EXPRESSIONS ///////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 macro_rules! unary_expression_parser {
     ($func_name:ident, $below:ident, $tok_type:path, $op_type:ident$(::$rest:ident)* $(,)?) => {
@@ -273,12 +294,12 @@ macro_rules! unary_expression_parser {
             let left_pos;
             match parser.first() {
                 Ok(Token {
-                    r#type: $tok_type,
+                    kind: $tok_type,
                     coords,
                     ..
                 }) => {
                     left_pos = coords;
-                    parser.consume_first();
+                    parser.bump();
                 }
                 Ok(_) => return $below(parser),
                 Err(e) if e == String::from(EOF_ERROR) => return Err(e),
@@ -289,55 +310,98 @@ macro_rules! unary_expression_parser {
             let right_pos = right.position();
             Ok(Expr::$op_type {
                 operand: Box::new(right),
-                position: Position::new(left_pos, right_pos.end),
+                span: Span::new(left_pos, right_pos.end),
             })
         }
     };
 }
 
-unary_expression_parser!(
-    not_unary_expression,
-    minus_unary_expression,
-    TokenType::Not,
-    Not,
-);
+unary_expression_parser!(not_expr, unary_sub_expr, Not, Not);
 
-unary_expression_parser!(
-    minus_unary_expression,
-    value_expression,
-    TokenType::Sub,
-    UnarySub,
-);
+unary_expression_parser!(unary_sub_expr, value_expr, Sub, UnSub);
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // VALUE EXPRESSIONS ///////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
-pub(crate) fn value_expression(parser: &mut Parser) -> Result<Expr, String> {
+fn value_expr(parser: &mut Parser) -> Result<Expr, String> {
     match parser.first()? {
         Token {
-            r#type: TokenType::LeftParen,
+            kind: Number | False | True,
             ..
-        } => parenthesized_expression(parser),
+        } => literal_expr(parser),
         Token {
-            r#type: TokenType::Number | TokenType::False | TokenType::True,
+            kind: LeftParen | Ident,
             ..
-        } => literal_expression(parser),
-        Token {
-            r#type: TokenType::Ident,
-            ..
-        } => ident_expression(parser),
-        _ => unimplemented!(),
+        } => ident_or_parenthesized_expr_or_call(parser),
+        Token { kind, coords, .. } => {
+            let str_type = kind.to_string();
+            err_msg!(coords, "expected value (e.g. number, boolean), parenthesized expression, or identifier, but got `{}`", str_type)
+        }
     }
 }
 
-pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Expr, String> {
-    let Token { coords, .. } = parser.consume_token_of_type(TokenType::LeftParen)?;
+fn ident_or_parenthesized_expr_or_call(parser: &mut Parser) -> Result<Expr, String> {
+    let start = match parser.first() {
+        Ok(Token {
+            kind: LeftParen, ..
+        }) => parenthesized_expr(parser),
+        Ok(Token { kind: Ident, .. }) => ident_expr(parser),
+        _ => unreachable!(),
+    }?;
+
+    // If it has a trailing `(`, then it is a function call
+    if !parser.is_token_of_kind(LeftParen) {
+        Ok(start)
+    } else {
+        parser.consume_token_of_kind(LeftParen)?;
+        let args = many_delimited_by(parser, expr, Comma)?;
+        let end = parser.consume_token_of_kind(RightParen)?.coords;
+        let start_pos = start.position().start;
+        Ok(Expr::Call {
+            func: Box::new(start),
+            args,
+            span: Span::new(start_pos, end),
+        })
+    }
+}
+
+fn func_expr(parser: &mut Parser) -> Result<Expr, String> {
+    // | `args` | `body`
+    let start = parser.consume_token_of_kind(Bar)?.coords;
+    let args = many_delimited_by(parser, ident_expr, Comma)?
+        .iter()
+        .map(|x| {
+            if let Expr::Ident { val, .. } = x {
+                val.clone()
+            } else {
+                unreachable!()
+            }
+        })
+        .collect::<Vec<_>>();
+    parser.consume_token_of_kind(Bar)?;
+    let body = expr(parser)?;
+    let end = body.position().end;
+    Ok(Expr::Function {
+        args,
+        body: Box::new(body),
+        span: Span::new(start, end),
+    })
+}
+
+fn ident_expr(parser: &mut Parser) -> Result<Expr, String> {
+    let token = parser.consume_token_of_kind(Ident)?;
+    let end_coords = token.end_coords();
+    Ok(Expr::Ident {
+        val: token.value,
+        span: Span::new(token.coords, end_coords),
+    })
+}
+
+fn parenthesized_expr(parser: &mut Parser) -> Result<Expr, String> {
+    let Token { coords, .. } = parser.consume_token_of_kind(LeftParen)?;
     // Check that expr has a body
     match parser.first() {
         Ok(Token {
-            r#type: TokenType::RightParen,
-            ..
+            kind: RightParen, ..
         }) => return err_msg!(coords, "parenthesized expression has no body"),
         Err(_) => {
             return err_msg!(
@@ -347,46 +411,46 @@ pub(crate) fn parenthesized_expression(parser: &mut Parser) -> Result<Expr, Stri
         }
         _ => (),
     }
-    let body = match expression(parser) {
+    let body = match expr(parser) {
         Ok(val) => val,
-        Err(_) => return err_msg!(coords, "parethesized expression has incorrect contents"),
+        Err(e) => {
+            return err_msg!(
+                coords,
+                "parethesized expression has incorrect contents: {}",
+                e
+            )
+        }
     };
-    parser.consume_token_of_type(TokenType::RightParen)?;
+    parser.consume_token_of_kind(RightParen)?;
     Ok(body)
 }
 
-pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Expr, String> {
+fn literal_expr(parser: &mut Parser) -> Result<Expr, String> {
     match parser.first()? {
         Token {
-            r#type: TokenType::Number,
+            kind: Number,
             value,
             coords: Coords { line, column },
         } => {
-            parser.consume_first();
+            parser.bump();
             Ok(Expr::Number {
                 val: value.parse::<f64>().unwrap(),
-                position: Position::from_tuples(
-                    (line, column),
-                    (line, column + (value.len() as u16 - 1)),
-                ),
+                span: Span::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
             })
         }
         Token {
-            r#type: TokenType::True | TokenType::False,
+            kind: True | False,
             value,
             coords: Coords { line, column },
         } => {
-            parser.consume_first();
+            parser.bump();
             Ok(Expr::Boolean {
                 val: value == "true",
-                position: Position::from_tuples(
-                    (line, column),
-                    (line, column + (value.len() as u16 - 1)),
-                ),
+                span: Span::from_tuples((line, column), (line, column + (value.len() as u16 - 1))),
             })
         }
         Token {
-            r#type,
+            kind: r#type,
             value,
             coords,
         } => {
@@ -401,15 +465,6 @@ pub(crate) fn literal_expression(parser: &mut Parser) -> Result<Expr, String> {
     }
 }
 
-pub(crate) fn ident_expression(parser: &mut Parser) -> Result<Expr, String> {
-    let token = parser.consume_token_of_type(TokenType::Ident)?;
-    let end_coords = token.end_coords();
-    Ok(Expr::Ident {
-        val: token.value,
-        position: Position::new(token.coords, end_coords),
-    })
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // TESTS ///////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -422,16 +477,16 @@ mod tests {
         let expected = Ok(Expr::Mul {
             left: Box::new(Expr::Number {
                 val: 12.,
-                position: Position::from_tuples((1, 1), (1, 2)),
+                span: Span::from_tuples((1, 1), (1, 2)),
             }),
             right: Box::new(Expr::Number {
                 val: 42.,
-                position: Position::from_tuples((1, 6), (1, 7)),
+                span: Span::from_tuples((1, 6), (1, 7)),
             }),
-            position: Position::from_tuples((1, 1), (1, 7)),
+            span: Span::from_tuples((1, 1), (1, 7)),
         });
         let mut input = Parser::new(token::tokenize("12 * 42"));
-        assert_eq!(binary_expression(&mut input), expected);
+        assert_eq!(binary_expr(&mut input), expected);
     }
 
     #[test]
@@ -439,33 +494,33 @@ mod tests {
         let expected = Ok(Expr::Div {
             left: Box::new(Expr::Number {
                 val: 12.,
-                position: Position::from_tuples((1, 1), (1, 2)),
+                span: Span::from_tuples((1, 1), (1, 2)),
             }),
             right: Box::new(Expr::Number {
                 val: 42.,
-                position: Position::from_tuples((1, 6), (1, 7)),
+                span: Span::from_tuples((1, 6), (1, 7)),
             }),
-            position: Position::from_tuples((1, 1), (1, 7)),
+            span: Span::from_tuples((1, 1), (1, 7)),
         });
         let mut input = Parser::new(token::tokenize("12 / 42"));
-        assert_eq!(binary_expression(&mut input), expected);
+        assert_eq!(binary_expr(&mut input), expected);
     }
 
     #[test]
     fn minus_expression() {
-        let expected = Ok(Expr::Mul {
+        let expected = Ok(Expr::Sub {
             left: Box::new(Expr::Number {
                 val: 12.,
-                position: Position::from_tuples((1, 1), (1, 2)),
+                span: Span::from_tuples((1, 1), (1, 2)),
             }),
             right: Box::new(Expr::Number {
                 val: 42.,
-                position: Position::from_tuples((1, 1), (1, 2)),
+                span: Span::from_tuples((1, 6), (1, 7)),
             }),
-            position: Position::from_tuples((1, 1), (1, 12)),
+            span: Span::from_tuples((1, 1), (1, 7)),
         });
         let mut input = Parser::new(token::tokenize("12 - 42"));
-        assert_eq!(binary_expression(&mut input), expected);
+        assert_eq!(binary_expr(&mut input), expected);
     }
 
     #[test]
@@ -473,23 +528,23 @@ mod tests {
         let expected = Ok(Expr::Mul {
             left: Box::new(Expr::Number {
                 val: 12.,
-                position: Position::from_tuples((1, 1), (1, 2)),
+                span: Span::from_tuples((1, 1), (1, 2)),
             }),
             right: Box::new(Expr::Mul {
                 left: Box::new(Expr::Number {
                     val: 42.,
-                    position: Position::from_tuples((1, 6), (1, 7)),
+                    span: Span::from_tuples((1, 6), (1, 7)),
                 }),
                 right: Box::new(Expr::Number {
                     val: 32.,
-                    position: Position::from_tuples((1, 11), (1, 12)),
+                    span: Span::from_tuples((1, 11), (1, 12)),
                 }),
-                position: Position::from_tuples((1, 6), (1, 12)),
+                span: Span::from_tuples((1, 6), (1, 12)),
             }),
-            position: Position::from_tuples((1, 1), (1, 12)),
+            span: Span::from_tuples((1, 1), (1, 12)),
         });
         let mut input = Parser::new(token::tokenize("12 * 42 * 32"));
-        assert_eq!(binary_expression(&mut input), expected);
+        assert_eq!(binary_expr(&mut input), expected);
     }
 
     #[test]
@@ -498,36 +553,36 @@ mod tests {
             left: Box::new(Expr::Add {
                 left: Box::new(Expr::Number {
                     val: 2.,
-                    position: Position::from_tuples((1, 1), (1, 1)),
+                    span: Span::from_tuples((1, 1), (1, 1)),
                 }),
                 right: Box::new(Expr::Number {
                     val: 3.,
-                    position: Position::from_tuples((1, 5), (1, 5)),
+                    span: Span::from_tuples((1, 5), (1, 5)),
                 }),
-                position: Position::from_tuples((1, 1), (1, 5)),
+                span: Span::from_tuples((1, 1), (1, 5)),
             }),
             right: Box::new(Expr::Mul {
                 left: Box::new(Expr::Div {
                     left: Box::new(Expr::Number {
                         val: 4.,
-                        position: Position::from_tuples((1, 9), (1, 9)),
+                        span: Span::from_tuples((1, 9), (1, 9)),
                     }),
                     right: Box::new(Expr::Number {
                         val: 5.,
-                        position: Position::from_tuples((1, 13), (1, 13)),
+                        span: Span::from_tuples((1, 13), (1, 13)),
                     }),
-                    position: Position::from_tuples((1, 9), (1, 13)),
+                    span: Span::from_tuples((1, 9), (1, 13)),
                 }),
                 right: Box::new(Expr::Number {
                     val: 6.,
-                    position: Position::from_tuples((1, 17), (1, 17)),
+                    span: Span::from_tuples((1, 17), (1, 17)),
                 }),
-                position: Position::from_tuples((1, 13), (1, 17)),
+                span: Span::from_tuples((1, 9), (1, 17)),
             }),
-            position: Position::from_tuples((1, 1), (1, 17)),
+            span: Span::from_tuples((1, 1), (1, 17)),
         });
         let mut input = Parser::new(token::tokenize("2 + 3 - 4 / 5 * 6")); // should be (2 + 3) - ((4 / 5) * 6)
-        let result = binary_expression(&mut input);
+        let result = binary_expr(&mut input);
         assert_eq!(result, expected);
     }
 
@@ -538,46 +593,61 @@ mod tests {
             left: Box::new(Expr::Add {
                 left: Box::new(Expr::Number {
                     val: 2.,
-                    position: Position::from_tuples((1, 2), (1, 2)),
+                    span: Span::from_tuples((1, 2), (1, 2)),
                 }),
                 right: Box::new(Expr::Number {
                     val: 3.,
-                    position: Position::from_tuples((1, 6), (1, 6)),
+                    span: Span::from_tuples((1, 6), (1, 6)),
                 }),
-                position: Position::from_tuples((1, 1), (1, 7)),
+                span: Span::from_tuples((1, 2), (1, 6)),
             }),
             right: Box::new(Expr::Number {
                 val: 3.,
-                position: Position::from_tuples((1, 11), (1, 11)),
+                span: Span::from_tuples((1, 11), (1, 11)),
             }),
-            position: Position::from_tuples((1, 1), (1, 11)),
+            span: Span::from_tuples((1, 2), (1, 11)),
         });
         let mut input = Parser::new(token::tokenize(input));
-        assert_eq!(expression(&mut input), expected);
+        assert_eq!(expr(&mut input), expected);
     }
 
     #[test]
     fn unary_minus() {
         let input = "- 32 - - 23";
         let expected = Ok(Expr::Sub {
-            left: Box::new(Expr::UnarySub {
+            left: Box::new(Expr::UnSub {
                 operand: Box::new(Expr::Number {
                     val: 32.,
-                    position: Position::from_tuples((1, 3), (1, 4)),
+                    span: Span::from_tuples((1, 3), (1, 4)),
                 }),
-                position: Position::from_tuples((1, 1), (1, 4)),
+                span: Span::from_tuples((1, 1), (1, 4)),
             }),
-            right: Box::new(Expr::UnarySub {
+            right: Box::new(Expr::UnSub {
                 operand: Box::new(Expr::Number {
                     val: 23.,
-                    position: Position::from_tuples((1, 10), (1, 11)),
+                    span: Span::from_tuples((1, 10), (1, 11)),
                 }),
-                position: Position::from_tuples((1, 8), (1, 11)),
+                span: Span::from_tuples((1, 8), (1, 11)),
             }),
-            position: Position::from_tuples((1, 1), (1, 11)),
+            span: Span::from_tuples((1, 1), (1, 11)),
         });
 
         let mut input = Parser::new(token::tokenize(input));
-        assert_eq!(expression(&mut input), expected);
+        assert_eq!(expr(&mut input), expected);
+    }
+
+    #[test]
+    fn let_binding() {
+        let input = "let a = 5;";
+        let expected = Ok(Expr::Assignment {
+            id: String::from("a"),
+            body: Box::new(Expr::Number {
+                val: 5.,
+                span: Span::from_tuples((1, 9), (1, 9)),
+            }),
+            span: Span::from_tuples((1, 1), (1, 9)),
+        });
+        let mut input = Parser::new(token::tokenize(input));
+        assert_eq!(expr(&mut input), expected);
     }
 }

@@ -1,4 +1,7 @@
-use std::io::{self, stdin, stdout, Write};
+use std::{fs, io};
+
+use clap::{Parser, Subcommand};
+use evaluate::{interpret, repl};
 
 pub mod ast;
 pub mod error;
@@ -6,32 +9,38 @@ pub mod evaluate;
 pub mod parse;
 pub mod token;
 
-fn main() -> Result<(), io::Error> {
-    let mut input = String::new();
-    let mut state: evaluate::State = Default::default();
-    loop {
-        print!(">>> ");
-        stdout().flush()?;
-        stdin().read_line(&mut input)?;
-
-        if input.trim() == "exit".to_string() {
-            break;
-        }
-
-        let tokens = token::tokenize(&input.trim());
-        input = "".to_string();
-        let tree = match parse::parse(tokens) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                continue;
+fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Repl => repl()?,
+        Commands::Exec { file } => {
+            let doc = match fs::read_to_string(file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    return Ok(());
+                }
+            };
+            match interpret(&doc) {
+                Ok(v) => println!("{}", v.to_string()),
+                Err(e) => eprintln!("{}", e),
             }
-        };
-        let (_, res) = evaluate::execute!(tree, state);
-        match res[0] {
-            Ok(ref v) => println!("{}", v.to_string()),
-            Err(ref e) => eprintln!("{}", e),
         }
     }
     Ok(())
+}
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Clone)]
+enum Commands {
+    #[command(about = "Run the REPL")]
+    Repl,
+    #[command(about = "Execute the file")]
+    Exec { file: String },
 }

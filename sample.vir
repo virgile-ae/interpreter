@@ -1,0 +1,7 @@
+let fac = |n| if n == 1 {
+    n
+} else {
+    fac(n-1) * n
+};
+
+fac(3)

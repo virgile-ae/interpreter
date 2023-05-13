@@ -1,20 +1,34 @@
-use std::collections::HashMap;
-
-use crate::{
-    ast::{Decl, Expr},
-    err_msg,
+use std::{
+    collections::{HashMap, HashSet},
+    io,
 };
 
-// Node instead of value makes the language lazy
-pub(crate) type State = HashMap<String, Expr>;
+use crate::{ast::Expr, parse::parse, token::tokenize};
+use std::io::{stdin, stdout, Write};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct State(HashMap<String, Value>);
+
+impl State {
+    pub fn define(&mut self, name: &String, value: Value) {
+        self.0.insert(name.to_string(), value);
+    }
+
+    pub fn get(&self, name: &String) -> Result<Value, String> {
+        self.0
+            .get(name)
+            .ok_or(format!("undefined variable `{}`", name))
+            .cloned()
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Bool(bool),
     Num(f64),
     // Record(HashMap<String, Value>),
     // Str(String),
-    Variable(String),
+    Function { args: Vec<String>, body: Box<Expr> },
     Unit,
 }
 
@@ -23,10 +37,50 @@ impl ToString for Value {
         match self {
             Value::Bool(b) => b.to_string(),
             Value::Num(f) => f.to_string(),
-            Value::Variable(v) => v.clone(),
-            Value::Unit => "()".to_string(),
+            Value::Unit => String::from(""),
+            Value::Function { args, body } => {
+                format!("|{}| {{ {} }}", args.join(", "), body.to_string())
+            }
         }
     }
+}
+
+pub fn interpret(s: &str) -> Result<Value, String> {
+    let tokens = tokenize(s);
+    let ast = parse(tokens)?;
+    let mut state = Default::default();
+    let (_, res) = execute!(ast, state);
+    res
+}
+
+pub fn repl() -> io::Result<()> {
+    let mut input = String::new();
+    let mut state: State = Default::default();
+    loop {
+        print!(">>> ");
+        stdout().flush()?;
+        stdin().read_line(&mut input)?;
+
+        if input.trim() == "exit".to_string() {
+            break;
+        }
+
+        let tokens = tokenize(&input.trim());
+        input = "".to_string();
+        let tree = match parse(tokens) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                continue;
+            }
+        };
+        let (_, res) = execute!(tree, state);
+        match res {
+            Ok(ref v) => println!("{}", v.to_string()),
+            Err(ref e) => eprintln!("{}", e),
+        }
+    }
+    Ok(())
 }
 
 #[macro_export]
@@ -44,68 +98,25 @@ macro_rules! execute {
 pub(crate) use execute;
 
 pub(crate) fn execute_inner(
-    declarations: Vec<Decl>,
+    expressions: Vec<Expr>,
     state: &mut State,
-) -> (State, Vec<Result<Value, String>>) {
-    let values = declarations
+) -> (State, Result<Value, String>) {
+    let values = expressions
         .iter()
-        .map(|x| declaration(state, x.clone()))
-        .collect();
+        .map(|x| eval_expr(state, x.clone()))
+        .last()
+        .unwrap_or(Ok(Value::Unit));
     (state.clone(), values)
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// DECLARATIONS ////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-pub(crate) fn declaration(state: &mut State, node: Decl) -> Result<Value, String> {
-    // match node.value {
-    //     NodeType::Declaration(_) => assignment_declaration(state, node),
-    //     _ => expression_declaration(state, node),
-    // }
-    match node {
-        Decl::Assignment { .. } => assignment_declaration(state, node),
-        Decl::Expression(ex) => expression(state, ex),
-    }
-}
-
 // ASSIGNMENT DECLARATION //////////////////////////////////////////////////////////////////////////
-fn assignment_declaration(state: &mut State, node: Decl) -> Result<Value, String> {
-    // match *node.value {
-    //     NodeType::Declaration(Declaration::Assignment { id, body }) => {
-    //         if state.contains_key(&id) {
-    //             err_msg!(
-    //                 node.position.start,
-    //                 "variable `{}` cannot be redefined or defined as itself",
-    //                 id
-    //             )
-    //         } else {
-    //             state.insert(id, *body);
-    //             Ok(Value::Unit)
-    //         }
-    //     }
-    //     _ => unreachable!(),
-    // }
+fn assignment_expr(state: &mut State, node: Expr) -> Result<Value, String> {
     match node {
-        Decl::Assignment { id, body, position } => {
-            if state.contains_key(&id) {
-                err_msg!(
-                    position.start,
-                    "variable `{}` cannot be redefined or defined as itself",
-                    id
-                )
-            } else {
-                state.insert(id, *body);
-                Ok(Value::Unit)
-            }
+        Expr::Assignment { id, body, .. } => {
+            let res = eval_expr(state, *body)?;
+            state.define(&id, res);
+            Ok(Value::Unit)
         }
-        _ => unreachable!(),
-    }
-}
-
-// ASSIGNMENT DECLARATION //////////////////////////////////////////////////////////////////////////
-fn expression_declaration(state: &State, node: Decl) -> Result<Value, String> {
-    match node {
-        Decl::Expression(e) => expression(state, e),
         _ => unreachable!(),
     }
 }
@@ -114,15 +125,15 @@ fn expression_declaration(state: &State, node: Decl) -> Result<Value, String> {
 // EXPRESSIONS /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-fn expression(state: &State, node: Expr) -> Result<Value, String> {
+fn eval_expr(state: &mut State, node: Expr) -> Result<Value, String> {
     match node {
         Expr::Ident { .. } => ident_expr(state, node),
         Expr::Number { .. } => literal_expr(node),
         Expr::String { .. } => todo!(),
         Expr::Boolean { .. } => literal_expr(node),
-        Expr::Call { .. } => todo!(),
+        Expr::Call { .. } => call_expr(state, node),
         Expr::Not { .. } => not_expr(state, node),
-        Expr::UnarySub { .. } => unary_sub_expr(state, node),
+        Expr::UnSub { .. } => unary_sub_expr(state, node),
         Expr::Or { .. } => or_expr(state, node),
         Expr::And { .. } => and_expr(state, node),
         Expr::EqEq { .. } => eqeq_expr(state, node),
@@ -137,13 +148,113 @@ fn expression(state: &State, node: Expr) -> Result<Value, String> {
         Expr::Div { .. } => div_expr(state, node),
         Expr::Mul { .. } => mul_expr(state, node),
         Expr::Pow { .. } => pow_expr(state, node),
-        Expr::IfElse { .. } => todo!(),
-        Expr::Block { .. } => todo!(),
+        Expr::IfElse { .. } => if_else_expr(state, node),
+        Expr::Block { .. } => block_expr(state, node),
+        Expr::Assignment { .. } => assignment_expr(state, node),
+        Expr::Function { .. } => func_expr(state, node),
     }
 }
-////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// FUNCTION EXPRESSION /////////////////////////////////////////////////////////////////////////////
+fn func_expr(_state: &mut State, node: Expr) -> Result<Value, String> {
+    if let Expr::Function { args, body, .. } = node {
+        Ok(Value::Function { args, body })
+    } else {
+        unreachable!()
+    }
+}
+
+// FIXME: problem arises with a higher order function when it's params have the same name as the
+// params of the function it is being called with
+fn call_expr(state: &mut State, node: Expr) -> Result<Value, String> {
+    if let Expr::Call { func, args, .. } = node {
+        // Extract function args and body
+        let func_args;
+        let func_body;
+        match eval_expr(state, *func)? {
+            Value::Function { args, body } => {
+                func_args = args;
+                func_body = body;
+            }
+            Value::Bool(b) => {
+                return Err(format!("`{b}` is not a function and so can't be called"))
+            }
+            Value::Num(b) => return Err(format!("`{b}` is not a function and so can't be called")),
+            Value::Unit => todo!(),
+        };
+        // Ensure that the correct number of arguments were provided
+        if func_args.len() != args.len() {
+            return Err(format!(
+                "function takes {} arguments, but only {} were provided",
+                func_args.len(),
+                args.len()
+            ));
+        }
+        // Check that the identifiers are all different in func_args
+        {
+            let mut acc = HashSet::new();
+            for i in func_args.iter() {
+                if acc.contains(&i) {
+                    return Err(format!(
+                        "function can't have 2 arguments with the same identifier (`{}`)",
+                        i
+                    ));
+                } else {
+                    acc.insert(i);
+                }
+            }
+        }
+        // Setting up inner state
+        let mut inner_state = state.clone();
+
+        for (key, val) in func_args.iter().zip(args.iter()) {
+            // inner_state.define(key, EvalState::Unevaluated(val.clone()));
+            inner_state.define(key, eval_expr(state, val.clone())?);
+        }
+
+        // Evaluate the function body with the new inner state
+        eval_expr(&mut inner_state, *func_body)
+    } else {
+        unreachable!()
+    }
+}
+
+// IF ELSE EXPRESSION //////////////////////////////////////////////////////////////////////////////
+fn if_else_expr(state: &mut State, node: Expr) -> Result<Value, String> {
+    if let Expr::IfElse {
+        cond,
+        on_true,
+        on_false,
+        ..
+    } = node
+    {
+        match eval_expr(state, *cond)? {
+            Value::Bool(true) => block_expr(state, *on_true),
+            Value::Bool(false) => block_expr(state, *on_false),
+            _ => unreachable!(),
+        }
+    } else {
+        unreachable!()
+    }
+}
+
+// BLOCK EXPRESSION ////////////////////////////////////////////////////////////////////////////////
+fn block_expr(state: &mut State, node: Expr) -> Result<Value, String> {
+    if let Expr::Block { exprs, .. } = node {
+        // Setting up inner state
+        let mut inner_state = state.clone();
+
+        exprs
+            .iter()
+            .map(|x| eval_expr(&mut inner_state, x.clone()))
+            .last()
+            .unwrap_or(Ok(Value::Unit))
+    } else {
+        unreachable!()
+    }
+}
+
 // UNARY EXPRESSIONS ///////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
 macro_rules! create_unary_expr {
     (
         $func_name:ident,
@@ -152,12 +263,12 @@ macro_rules! create_unary_expr {
         $type:ident$(::$type_rest:ident)*,
         $func:ident$(::$func_rest:ident)* $(,)?
     ) => {
-        fn $func_name(state: &State, node: Expr) -> Result<Value, String> {
+        fn $func_name(state: &mut State, node: Expr) -> Result<Value, String> {
             if let Expr::$op {
                 operand,
                 ..
             } = node {
-                let body = expression(state, *operand)?;
+                let body = eval_expr(state, *operand)?;
                 match body {
                     $type$(::$type_rest)*(body) => Ok($type$(::$type_rest)*($func$(::$func_rest)*(body))),
                     body => Err(format!(
@@ -176,7 +287,7 @@ const NOT: fn(bool) -> bool = |x| !x;
 create_unary_expr!(not_expr, Not, "not", Value::Bool, NOT);
 
 const UNARY_SUB: fn(f64) -> f64 = |x| -x;
-create_unary_expr!(unary_sub_expr, UnarySub, "-", Value::Num, UNARY_SUB);
+create_unary_expr!(unary_sub_expr, UnSub, "-", Value::Num, UNARY_SUB);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // BINARY EXPRESSIONS //////////////////////////////////////////////////////////////////////////////
@@ -185,19 +296,19 @@ create_unary_expr!(unary_sub_expr, UnarySub, "-", Value::Num, UNARY_SUB);
 macro_rules! create_binary_expr {
     (
         $func_name:ident,
-        $op:ident$(::$op_rest:ident)*,
+        $op:ident,
         $err_str:literal,
         $param_type:ident$(::$param_type_rest:ident)*,
         $return_type:ident$(::$return_rest:ident)*,
-        $func:ident$(::$func_rest:ident)* $(,)?
+        $func:ident $(,)?
     ) => {
-        fn $func_name(state: &State, node: Expr) -> Result<Value, String> {
+        fn $func_name(state: &mut State, node: Expr) -> Result<Value, String> {
             if let Expr::$op { left, right, .. } = node {
-                let left = expression(state, *left)?;
-                let right = expression(state, *right)?;
+                let left = eval_expr(state, *left)?;
+                let right = eval_expr(state, *right)?;
                 match (left, right) {
                     ($param_type$(::$param_type_rest)*(left), $param_type$(::$param_type_rest)*(right)) =>
-                        Ok($return_type$(::$return_rest)*($func$(::$func_rest)*(left,right))),
+                        Ok($return_type$(::$return_rest)*($func(left,right))),
 
                     (left, $param_type$(::$param_type_rest)*(_)) => Err(format!(
                         "unsupported lhs operand for `{}` operator: `{}`",
@@ -269,7 +380,7 @@ const ADD: fn(f64, f64) -> f64 = |l, r| l + r;
 create_binary_expr!(add_expr, Add, "+", Value::Num, ADD);
 
 const MUL: fn(f64, f64) -> f64 = |l, r| l * r;
-create_binary_expr!(mul_expr, Mul, "*", Value::Num, MUL,);
+create_binary_expr!(mul_expr, Mul, "*", Value::Num, MUL);
 
 const DIV: fn(f64, f64) -> f64 = |l, r| l / r;
 create_binary_expr!(div_expr, Div, "/", Value::Num, DIV);
@@ -285,159 +396,90 @@ fn literal_expr(node: Expr) -> Result<Value, String> {
         Expr::Number { val, .. } => Ok(Value::Num(val)),
         Expr::String { .. } => todo!(),
         Expr::Boolean { val, .. } => Ok(Value::Bool(val)),
-        _ => panic!("literal_expr should receive Literal, but got {:?}", node),
+        _ => unreachable!(),
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// LITERAL EXPRESSIONS /////////////////////////////////////////////////////////////////////////////
+// IDENTIFIER EXPRESSION ///////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-fn ident_expr(state: &State, node: Expr) -> Result<Value, String> {
+fn ident_expr(state: &mut State, node: Expr) -> Result<Value, String> {
     if let Expr::Ident { val, .. } = node {
-        expression(state, state[&val].clone())
+        // state.eval_get(&val)
+        state.get(&val)
     } else {
-        panic!("ident_expr should receive Ident, but got {:?}", node);
+        unreachable!()
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // TESTS ///////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-/* #[cfg(test)]
- mod tests {
-    use crate::{evaluate::*, parse, token::*};
+
+#[cfg(test)]
+mod tests {
+    use crate::{evaluate::*, parse};
+
+    fn should_evaluate_to(input: &str, expected: Value) {
+        let tokens = tokenize(input);
+        let ast = parse::parse(tokens).unwrap();
+        let (_, result) = execute!(ast);
+        assert_eq!(result, Ok(expected));
+    }
 
     #[test]
     fn num_literal() {
         // Integer
-        let expected = 5.;
-        let input = String::from("5");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        should_evaluate_to("5", Value::Num(5.));
 
         // Real
-        let expected = 5.4;
-        let input = String::from("5.4");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        should_evaluate_to("5.4", Value::Num(5.4));
+
         // Scientific notation
-        let expected = 5.4e-5;
-        let input = String::from("5.4e-5");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        should_evaluate_to("5.4e-5", Value::Num(5.4e-5));
     }
 
     #[test]
     fn bool_literal() {
-        let expected = true;
-        let input = String::from("true");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Bool(expected))
-        );
+        should_evaluate_to("true", Value::Bool(true));
+        should_evaluate_to("false", Value::Bool(false));
     }
 
     #[test]
-    fn star_expression() {
-        let expected = 60.;
-        let input = String::from("5 * 12");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
-    }
+    fn binary_expression() {
+        // Numbers
+        should_evaluate_to("5 * 12", Value::Num(60.));
+        should_evaluate_to("12 / 12", Value::Num(1.));
+        should_evaluate_to("5 + 12", Value::Num(17.));
+        should_evaluate_to("5 - 12", Value::Num(-7.));
+        should_evaluate_to("12 % 5", Value::Num(2.));
+        should_evaluate_to("2 ** 5", Value::Num(32.));
 
-    #[test]
-    fn divide_expression() {
-        let expected = 2.;
-        let input = String::from("12 / 6");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        // Boolean
+        should_evaluate_to("true and false", Value::Bool(false));
+        should_evaluate_to("false or true", Value::Bool(true));
     }
-
     #[test]
-    fn add_expression() {
-        let expected = 25.;
-        let input = String::from("5 + 20");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
-    }
-
-    #[test]
-    fn minus_expression() {
-        let expected = -15.;
-        let input = String::from("5 - 20");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
-    }
-
-    #[test]
-    fn add_and_star_expression() {
-        let expected = 13.;
-        let input = String::from("3*3 + 2*2");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+    fn unary_expression() {
+        should_evaluate_to("-5", Value::Num(-5.));
+        should_evaluate_to("not false", Value::Bool(true));
     }
 
     #[test]
     fn order_binary_expression() {
-        let expected = 5.;
-        let input = String::from("4/2 * 3 + 5 - 6");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
-    }
-
-    #[test]
-    fn reverse_order_binary_expression() {
-        let expected = -5.;
-        let input = String::from("6 - 5 + 3 * 4 / 2");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        should_evaluate_to("4/2 * 3 + 5 - 6", Value::Num(5.));
+        should_evaluate_to("6 - 5 + 3 * 4 / 2", Value::Num(-5.));
     }
 
     #[test]
     fn parenthesized_expression() {
         // With brackets
-        let expected = 15.;
-        let input = String::from("(2 + 3) * 3");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
-
-        // Without brackets
-        let expected = 11.;
-        let input = String::from("2 + 3 * 3");
-        assert_eq!(
-            expression(parse::parse(tokenize(&input)).unwrap()[0]),
-            Ok(Value::Num(expected))
-        );
+        should_evaluate_to("(2 + 3) * 3", Value::Num(15.));
+        should_evaluate_to("2 + 3 * 3", Value::Num(11.));
     }
 
     #[test]
     fn comparative_expression() {
-        let expected = true;
-        let input = String::from("2 >= 2 and 4.2 == 4.2");
-        let tokens = tokenize(&input);
-        let as_tree = parse::parse(tokens).unwrap()[0];
-        assert_eq!(expression(as_tree), Ok(Value::Bool(expected)));
+        should_evaluate_to("2 >= 2 and 4.2 == 4.2", Value::Bool(true));
     }
-} */
+}
